@@ -1,0 +1,188 @@
+{
+  "name": "GridMind Demo Network",
+  "notes": "Fully synthetic 8-node network. Lossless linear transport flow (no impedance, losses or voltage angles). Not a real grid.",
+  "unmet_penalty_per_mwh": 1000.0,
+  "interval_hours": 1.0,
+  "nodes": [
+    {
+      "id": "north-gen",
+      "name": "North Generation",
+      "demand_mw": 0.0
+    },
+    {
+      "id": "west-ren",
+      "name": "West Renewables",
+      "demand_mw": 0.0
+    },
+    {
+      "id": "central-hub",
+      "name": "Central Hub",
+      "demand_mw": 0.0
+    },
+    {
+      "id": "east-hub",
+      "name": "East Hub",
+      "demand_mw": 0.0
+    },
+    {
+      "id": "south-hub",
+      "name": "South Hub",
+      "demand_mw": 0.0
+    },
+    {
+      "id": "north-zone",
+      "name": "North Demand",
+      "demand_mw": 120.0
+    },
+    {
+      "id": "central-zone",
+      "name": "Central Demand",
+      "demand_mw": 165.0
+    },
+    {
+      "id": "south-zone",
+      "name": "South Demand",
+      "demand_mw": 90.0
+    }
+  ],
+  "generators": [
+    {
+      "id": "gas-north",
+      "name": "North Thermal",
+      "node": "north-gen",
+      "fuel": "gas",
+      "capacity_mw": 200.0,
+      "cost_per_mwh": 84.0,
+      "renewable": false,
+      "availability_mw": 200.0,
+      "online": true,
+      "ramp_up_mw": 60.0,
+      "ramp_down_mw": 60.0
+    },
+    {
+      "id": "hydro-central",
+      "name": "Central Hydro",
+      "node": "central-hub",
+      "fuel": "hydro",
+      "capacity_mw": 85.0,
+      "cost_per_mwh": 42.0,
+      "renewable": true,
+      "availability_mw": 65.0,
+      "online": true
+    },
+    {
+      "id": "solar-west",
+      "name": "West Solar",
+      "node": "west-ren",
+      "fuel": "solar",
+      "capacity_mw": 120.0,
+      "cost_per_mwh": 0.0,
+      "renewable": true,
+      "availability_mw": 72.0,
+      "online": true
+    },
+    {
+      "id": "wind-west",
+      "name": "West Wind",
+      "node": "west-ren",
+      "fuel": "wind",
+      "capacity_mw": 70.0,
+      "cost_per_mwh": 0.0,
+      "renewable": true,
+      "availability_mw": 48.0,
+      "online": true
+    },
+    {
+      "id": "gas-east",
+      "name": "East Thermal",
+      "node": "east-hub",
+      "fuel": "gas",
+      "capacity_mw": 170.0,
+      "cost_per_mwh": 105.0,
+      "renewable": false,
+      "availability_mw": 170.0,
+      "online": true,
+      "ramp_up_mw": 50.0,
+      "ramp_down_mw": 50.0
+    },
+    {
+      "id": "gas-south",
+      "name": "South Peaker",
+      "node": "south-hub",
+      "fuel": "gas",
+      "capacity_mw": 120.0,
+      "cost_per_mwh": 128.0,
+      "renewable": false,
+      "availability_mw": 120.0,
+      "online": true,
+      "ramp_up_mw": 80.0,
+      "ramp_down_mw": 80.0
+    }
+  ],
+  "lines": [
+    {
+      "id": "line-north-central",
+      "name": "North-Central 400 kV",
+      "from_node": "north-gen",
+      "to_node": "central-hub",
+      "capacity_mw": 150.0,
+      "in_service": true
+    },
+    {
+      "id": "line-west-central",
+      "name": "West-Central 220 kV",
+      "from_node": "west-ren",
+      "to_node": "central-hub",
+      "capacity_mw": 110.0,
+      "in_service": true
+    },
+    {
+      "id": "line-central-east",
+      "name": "Central-East 220 kV",
+      "from_node": "central-hub",
+      "to_node": "east-hub",
+      "capacity_mw": 180.0,
+      "in_service": true
+    },
+    {
+      "id": "line-east-north",
+      "name": "East-North 132 kV",
+      "from_node": "east-hub",
+      "to_node": "north-zone",
+      "capacity_mw": 160.0,
+      "in_service": true
+    },
+    {
+      "id": "line-central-demand",
+      "name": "Central Feeder 132 kV",
+      "from_node": "central-hub",
+      "to_node": "central-zone",
+      "capacity_mw": 225.0,
+      "in_service": true
+    },
+    {
+      "id": "line-central-south",
+      "name": "Central-South 220 kV",
+      "from_node": "central-hub",
+      "to_node": "south-hub",
+      "capacity_mw": 110.0,
+      "in_service": true
+    },
+    {
+      "id": "line-south-demand",
+      "name": "South Feeder 132 kV",
+      "from_node": "south-hub",
+      "to_node": "south-zone",
+      "capacity_mw": 140.0,
+      "in_service": true
+    },
+    {
+      "id": "line-west-south",
+      "name": "West-South 220 kV",
+      "from_node": "west-ren",
+      "to_node": "south-hub",
+      "capacity_mw": 70.0,
+      "in_service": true
+    }
+  ]
+}

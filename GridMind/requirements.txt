@@ -1,0 +1,7 @@
+pyomo>=6.7
+highspy>=1.5          # HiGHS solver via appsi; the portable default (no GLPK install needed)
+numpy>=1.26
+pandas>=2.1
+pytest>=8.0
+scipy>=1.11           # independent cross-check reference LPs (tests) and benchmark helpers
+matplotlib>=3.8       # optional, not required by the core code

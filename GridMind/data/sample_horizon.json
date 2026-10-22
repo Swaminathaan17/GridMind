@@ -1,0 +1,912 @@
+{
+  "network_file": "sample_network.json",
+  "notes": "Fully synthetic 24-hour day: gaussian demand bumps (08:00/19:00), sine solar/wind lobes, mild hydro dip, two batteries, thermal ramp limits as declared in the network file. Not real grid data.",
+  "periods": 24,
+  "step_hours": 1.0,
+  "tiebreak_epsilon": 0.001,
+  "batteries": [
+    {
+      "id": "battery-central",
+      "node": "central-hub",
+      "capacity_mwh": 100.0,
+      "max_charge_mw": 40.0,
+      "max_discharge_mw": 40.0,
+      "eta_charge": 0.95,
+      "eta_discharge": 0.95,
+      "initial_soc_mwh": 50.0,
+      "min_soc_mwh": 10.0,
+      "final_soc_mwh": 50.0,
+      "throughput_cost_per_mwh": 0.0
+    },
+    {
+      "id": "battery-south",
+      "node": "south-hub",
+      "capacity_mwh": 40.0,
+      "max_charge_mw": 20.0,
+      "max_discharge_mw": 20.0,
+      "eta_charge": 0.9,
+      "eta_discharge": 0.9,
+      "initial_soc_mwh": 10.0,
+      "min_soc_mwh": 5.0,
+      "final_soc_mwh": 10.0,
+      "throughput_cost_per_mwh": 0.0
+    }
+  ],
+  "initial_dispatch_mw": {
+    "gas-north": 100.0,
+    "gas-east": 80.0,
+    "gas-south": 40.0
+  },
+  "demand_mw": [
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 96.0,
+      "central-zone": 132.0,
+      "south-zone": 72.0
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 96.0002,
+      "central-zone": 132.0003,
+      "south-zone": 72.0002
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 96.004,
+      "central-zone": 132.0055,
+      "south-zone": 72.003
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 96.0464,
+      "central-zone": 132.0638,
+      "south-zone": 72.0348
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 96.3428,
+      "central-zone": 132.4713,
+      "south-zone": 72.2571
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 97.624,
+      "central-zone": 134.233,
+      "south-zone": 73.218
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 100.9334,
+      "central-zone": 138.7834,
+      "south-zone": 75.7001
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 105.6093,
+      "central-zone": 145.2127,
+      "south-zone": 79.2069
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 108.0026,
+      "central-zone": 148.5036,
+      "south-zone": 81.002
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 105.6229,
+      "central-zone": 145.2315,
+      "south-zone": 79.2172
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 100.9978,
+      "central-zone": 138.8719,
+      "south-zone": 75.7483
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 97.875,
+      "central-zone": 134.5781,
+      "south-zone": 73.4063
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 97.1761,
+      "central-zone": 133.6172,
+      "south-zone": 72.8821
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 98.4041,
+      "central-zone": 135.3056,
+      "south-zone": 73.803
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 101.6881,
+      "central-zone": 139.8211,
+      "south-zone": 76.2661
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 107.6778,
+      "central-zone": 148.057,
+      "south-zone": 80.7583
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 116.4436,
+      "central-zone": 160.11,
+      "south-zone": 87.3327
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 126.4983,
+      "central-zone": 173.9351,
+      "south-zone": 94.8737
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 134.7709,
+      "central-zone": 185.31,
+      "south-zone": 101.0782
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 138.0,
+      "central-zone": 189.75,
+      "south-zone": 103.5
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 134.7709,
+      "central-zone": 185.31,
+      "south-zone": 101.0782
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 126.4983,
+      "central-zone": 173.9351,
+      "south-zone": 94.8737
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 116.4436,
+      "central-zone": 160.1099,
+      "south-zone": 87.3327
+    },
+    {
+      "north-gen": 0.0,
+      "west-ren": 0.0,
+      "central-hub": 0.0,
+      "east-hub": 0.0,
+      "south-hub": 0.0,
+      "north-zone": 107.6776,
+      "central-zone": 148.0567,
+      "south-zone": 80.7582
+    }
+  ],
+  "availability_mw": [
+    {
+      "gas-north": 200.0,
+      "hydro-central": 45.5,
+      "solar-west": 0.0,
+      "wind-west": 41.6735,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 48.0235,
+      "solar-west": 0.0,
+      "wind-west": 45.1061,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 50.375,
+      "solar-west": 0.0,
+      "wind-west": 47.264,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 52.3943,
+      "solar-west": 0.0,
+      "wind-west": 48.0,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 53.9437,
+      "solar-west": 0.0,
+      "wind-west": 47.264,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 54.9178,
+      "solar-west": 0.0,
+      "wind-west": 45.1061,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 55.25,
+      "solar-west": 0.0,
+      "wind-west": 41.6735,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 54.9178,
+      "solar-west": 18.635,
+      "wind-west": 37.2,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 53.9437,
+      "solar-west": 36.0,
+      "wind-west": 31.9905,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 52.3943,
+      "solar-west": 50.9117,
+      "wind-west": 26.4,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 50.375,
+      "solar-west": 62.3538,
+      "wind-west": 20.8095,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 48.0235,
+      "solar-west": 69.5467,
+      "wind-west": 15.6,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 45.5,
+      "solar-west": 72.0,
+      "wind-west": 11.1265,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 42.9765,
+      "solar-west": 69.5467,
+      "wind-west": 7.6939,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 40.625,
+      "solar-west": 62.3538,
+      "wind-west": 5.536,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 38.6057,
+      "solar-west": 50.9117,
+      "wind-west": 4.8,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 37.0563,
+      "solar-west": 36.0,
+      "wind-west": 5.536,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 36.0822,
+      "solar-west": 18.635,
+      "wind-west": 7.6939,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 35.75,
+      "solar-west": 0.0,
+      "wind-west": 11.1265,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 36.0822,
+      "solar-west": 0.0,
+      "wind-west": 15.6,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 37.0563,
+      "solar-west": 0.0,
+      "wind-west": 20.8095,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 38.6057,
+      "solar-west": 0.0,
+      "wind-west": 26.4,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 40.625,
+      "solar-west": 0.0,
+      "wind-west": 31.9905,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    },
+    {
+      "gas-north": 200.0,
+      "hydro-central": 42.9765,
+      "solar-west": 0.0,
+      "wind-west": 37.2,
+      "gas-east": 170.0,
+      "gas-south": 120.0
+    }
+  ],
+  "generator_online": [
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    },
+    {
+      "gas-north": true,
+      "hydro-central": true,
+      "solar-west": true,
+      "wind-west": true,
+      "gas-east": true,
+      "gas-south": true
+    }
+  ],
+  "line_in_service": [
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    },
+    {
+      "line-north-central": true,
+      "line-west-central": true,
+      "line-central-east": true,
+      "line-east-north": true,
+      "line-central-demand": true,
+      "line-central-south": true,
+      "line-south-demand": true,
+      "line-west-south": true
+    }
+  ]
+}
