@@ -174,7 +174,8 @@ def test_rolling_horizon_runs_all_periods_deterministic():
         assert step.runtime_seconds >= 0.0
         assert step.realized_cost_usd is not None
         assert "b1" in step.battery_soc_mwh
-        assert set(step.executed) == {"dispatch", "charge", "discharge", "unmet"}
+        # Network flows are recorded when available (useful for network-aware control)
+        assert set(step.executed) >= {"dispatch", "charge", "discharge", "unmet"}
 
 
 @needs_solver
@@ -327,6 +328,87 @@ def test_open_loop_baseline_records_terminal_soc():
                                                              renewable_sigma=0.0))
     assert base.status == "optimal"
     assert base.terminal_soc_mwh["b1"] == pytest.approx(10.0, abs=1e-4)
+
+
+# ========================================================= MW/MWh consistency =====
+def test_merit_order_recourse_uses_mw_balance_not_mwh():
+    """Battery power is MW; demand is MW. Do not multiply by dt."""
+    from gridmind.control import _merit_order_recourse
+    from gridmind.multiperiod import Battery, Horizon, ScheduleProblem
+    from gridmind.network import Generator, Network, Node
+
+    # demand 10 MW, battery can discharge 30 MW, no generation -> should serve all via discharge
+    net = Network(name="mw", nodes=(Node("bus", "bus"),),
+                  generators=(Generator("g", "G", "bus", "gas", 0.0, 10.0),),
+                  lines=(), unmet_penalty_per_mwh=5000.0)
+    hor = Horizon(periods=1, step_hours=0.5,  # dt irrelevant to MW balance
+                  demand_mw=({"bus": 10.0},),
+                  availability_mw=({"g": 0.0},),
+                  generator_online=({"g": True},),
+                  line_in_service=({},))
+    bat = Battery("b1", "bus", capacity_mwh=80.0, max_charge_mw=30.0, max_discharge_mw=30.0,
+                  initial_soc_mwh=20.0)
+    prob = ScheduleProblem(network=net, horizon=hor, batteries=(bat,))
+    res = _merit_order_recourse(prob, 0, hor.demand_mw, hor.availability_mw, {"b1": 20.0},
+                                charge={"b1": 0.0}, discharge={"b1": 30.0})
+    # Surplus exists (no export in local recourse) -> explicitly curtailed, not unmet
+    assert res["unmet"]["bus"] == pytest.approx(0.0, abs=1e-9)
+    assert res["discharge"]["b1"] == pytest.approx(10.0, abs=1e-9)
+    assert res["curtailed_mw"]["b1"] == pytest.approx(20.0, abs=1e-9)
+
+
+def test_merit_order_recourse_explicitly_curtails_surplus_without_silent_clamp():
+    """When surplus power exists and cannot be exported, discharge is curtailed and reported."""
+    from gridmind.control import _merit_order_recourse
+    from gridmind.multiperiod import Battery, Horizon, ScheduleProblem
+    from gridmind.network import Generator, Network, Node
+
+    net = Network(name="surp", nodes=(Node("bus", "bus"),),
+                  generators=(Generator("g", "G", "bus", "gas", 0.0, 10.0),),
+                  lines=(), unmet_penalty_per_mwh=5000.0)
+    hor = Horizon(periods=1, step_hours=0.5,  # dt different - should not affect MW balance
+                  demand_mw=({"bus": 10.0},),
+                  availability_mw=({"g": 0.0},),
+                  generator_online=({"g": True},),
+                  line_in_service=({},))
+    bat = Battery("b1", "bus", capacity_mwh=80.0, max_charge_mw=30.0, max_discharge_mw=30.0,
+                  initial_soc_mwh=20.0)
+    prob = ScheduleProblem(network=net, horizon=hor, batteries=(bat,))
+    res = _merit_order_recourse(prob, 0, hor.demand_mw, hor.availability_mw, {"b1": 20.0},
+                                charge={"b1": 0.0}, discharge={"b1": 30.0})
+    # demand 10 MW, discharge 30 MW -> surplus 20 MW, must be curtailed (no export)
+    assert res["discharge"]["b1"] == pytest.approx(10.0, abs=1e-9)
+    assert res["curtailed_mw"]["b1"] == pytest.approx(20.0, abs=1e-9)
+    assert res["curtailed_total_mw"] == pytest.approx(20.0, abs=1e-9)
+    assert res["unmet"]["bus"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_realized_redispatch_allows_export_when_network_has_capacity():
+    """With network export capacity, surplus should not be force-curtailed."""
+    from gridmind.control import _realized_redispatch
+    from gridmind.multiperiod import Battery, Horizon, ScheduleProblem
+    from gridmind.network import Generator, Line, Network, Node
+
+    net = Network(name="export", nodes=(Node("a", "A"), Node("b", "B")),
+                  generators=(Generator("g", "G", "a", "gas", 0.0, 100.0),),
+                  lines=(Line("ab", "A-B", "a", "b", 100.0),),
+                  unmet_penalty_per_mwh=5000.0)
+    hor = Horizon(periods=1, step_hours=1.0,
+                  demand_mw=({"a": 10.0, "b": 50.0},),
+                  availability_mw=({"g": 0.0},),
+                  generator_online=({"g": True},),
+                  line_in_service=({"ab": True},))
+    bat = Battery("b1", "a", capacity_mwh=200.0, max_charge_mw=50.0, max_discharge_mw=50.0,
+                  initial_soc_mwh=100.0)
+    prob = ScheduleProblem(network=net, horizon=hor, batteries=(bat,))
+    res = _realized_redispatch(prob, 0, hor.demand_mw, hor.availability_mw, {"b1": 100.0},
+                               charge={"b1": 0.0}, discharge={"b1": 40.0}, init_dispatch={})
+    # Network-aware re-dispatch uses injection directly (MW); committed battery actions preserved
+    assert res["discharge"]["b1"] == pytest.approx(40.0, abs=1e-6)
+    assert res["charge"]["b1"] == pytest.approx(0.0, abs=1e-6)
+    assert "curtailed_mw" in res
+    # Never silently clamp - curtailment must be explicitly reported
+    assert "curtailed_total_mw" in res
 
 
 # =============================================================== record shape ====

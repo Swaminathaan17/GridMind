@@ -415,6 +415,13 @@ def _merit_order_recourse(problem: ScheduleProblem, t: int,
     modelled (conservative local balance), so the plan is always feasible. Used both
     for the failed-replan fallback and to realise stochastic first-stage commitments
     against the ground truth.
+
+    Units: demand and battery power are **MW**, so the net battery injection is
+    subtracted directly (no ``dt`` factor - ``dt`` belongs in energy/SoC/costs).
+    When a node's committed discharge exceeds ``demand + charge`` there is surplus
+    power; this local recourse has neither export nor an explicit curtailment
+    variable, so the surplus is curtailed explicitly (reduced discharge, reported
+    in ``curtailed_mw``) instead of being silently clamped away.
     """
     net = problem.network
     demand_row = demand[t]
@@ -422,14 +429,25 @@ def _merit_order_recourse(problem: ScheduleProblem, t: int,
     online = problem.horizon.generator_online[t]
     dispatch: dict[str, float] = {g.id: 0.0 for g in net.generators}
     unmet: dict[str, float] = {}
-    dt = problem.step_hours
+    eff_charge = {b.id: float(charge.get(b.id, 0.0)) for b in problem.batteries}
+    eff_discharge = {b.id: float(discharge.get(b.id, 0.0)) for b in problem.batteries}
+    curtailed = {b.id: 0.0 for b in problem.batteries}
     for n in net.nodes:
-        # Discharging a battery at node n offsets that node's demand; charging adds.
-        net_batt = sum(float(discharge.get(b.id, 0.0)) for b in problem.batteries
-                       if b.node == n.id)
-        net_batt -= sum(float(charge.get(b.id, 0.0)) for b in problem.batteries
-                        if b.node == n.id)
-        need = max(0.0, float(demand_row[n.id]) - net_batt * dt)
+        node_batts = [b for b in problem.batteries if b.node == n.id]
+        ch_at = sum(eff_charge[b.id] for b in node_batts)
+        dis_at = sum(eff_discharge[b.id] for b in node_batts)
+        # Power balance is in MW: a battery injects (discharge - charge) directly.
+        need = float(demand_row[n.id]) - (dis_at - ch_at)
+        if need < 0.0:
+            # Surplus = discharge beyond local demand + charging load. Local
+            # recourse cannot export it, so explicitly curtail the excess discharge.
+            deliverable = dis_at + need  # == demand + charge_at
+            scale = deliverable / dis_at if dis_at > 0.0 else 0.0
+            for b in node_batts:
+                new_dis = eff_discharge[b.id] * scale
+                curtailed[b.id] += eff_discharge[b.id] - new_dis
+                eff_discharge[b.id] = new_dis
+            need = 0.0
         local = sorted((g for g in net.generators if g.node == n.id),
                        key=lambda g: (g.cost_per_mwh, g.id))
         for g in local:
@@ -444,8 +462,10 @@ def _merit_order_recourse(problem: ScheduleProblem, t: int,
         unmet[n.id] = max(0.0, need)
     return {"dispatch": dispatch,
             "flows": {},
-            "charge": {b.id: float(charge.get(b.id, 0.0)) for b in problem.batteries},
-            "discharge": {b.id: float(discharge.get(b.id, 0.0)) for b in problem.batteries},
+            "charge": eff_charge,
+            "discharge": eff_discharge,
+            "curtailed_mw": curtailed,
+            "curtailed_total_mw": float(sum(curtailed.values())),
             "soc": {b.id: float(soc_now[b.id]) for b in problem.batteries}, "unmet": unmet}
 
 
@@ -458,26 +478,30 @@ def _realized_redispatch(problem: ScheduleProblem, k: int,
                          init_dispatch: Mapping[str, float] | None = None) -> dict[str, Any]:
     """Serve period ``k`` at REALIZED conditions with the committed battery action.
 
-    The committed battery charge/discharge is applied as a fixed nodal injection
-    (net demand = demand - discharge + charge); a one-period, network-aware economic
-    dispatch then sets generation and unserved energy with the battery frozen. This
-    realises a stochastic first-stage commitment (or a fallback recovery) against the
-    ground truth using only period ``k`` data - no future leakage. ``init_dispatch``
-    (the previously executed dispatch) is honoured so generator ramp limits are
-    respected across the period boundary. Falls back to the conservative local
-    merit-order recourse if the solve fails or the solver is unavailable.
+    The committed battery charge/discharge is a **power** (MW) injection at its
+    node: ``discharge - charge`` enters the nodal balance directly (``dt`` belongs
+    in energy, SoC and cost calculations, never in the MW balance). A one-period,
+    network-aware economic dispatch then sets generation and unserved energy while
+    the battery is frozen at its carried state. Treating the commitment as an
+    injection (rather than subtracting it from demand) means any surplus power can
+    be exported over the lines; if the network cannot absorb it the solve is
+    infeasible and the explicit local recourse curtails the excess discharge and
+    reports it in ``curtailed_mw`` - it is never silently clamped away.
+
+    This realises a stochastic first-stage commitment (or a fallback recovery)
+    against the ground truth using only period ``k`` data - no future leakage.
+    ``init_dispatch`` (the previously executed dispatch) is honoured so generator
+    ramp limits are respected across the period boundary.
     """
     from gridmind.scheduling import solve_schedule
     net = problem.network
     dt = problem.step_hours
     node_ids = [n.id for n in net.nodes]
-    adj = {}
-    for n in node_ids:
-        off = sum(float(discharge.get(b.id, 0.0)) for b in problem.batteries if b.node == n)
-        off -= sum(float(charge.get(b.id, 0.0)) for b in problem.batteries if b.node == n)
-        adj[n] = max(0.0, float(realized_demand[k][n]) - off * dt)
+    injection = {b.id: float(discharge.get(b.id, 0.0)) - float(charge.get(b.id, 0.0))
+                 for b in problem.batteries}
     one = Horizon(
-        periods=1, step_hours=dt, demand_mw=({n: adj[n] for n in node_ids},),
+        periods=1, step_hours=dt,
+        demand_mw=(dict(realized_demand[k]),),
         availability_mw=(dict(realized_avail[k]),),
         generator_online=(dict(problem.horizon.generator_online[k]),),
         line_in_service=(dict(problem.horizon.line_in_service[k]),))
@@ -487,16 +511,25 @@ def _realized_redispatch(problem: ScheduleProblem, k: int,
     single = replace(problem, horizon=one, batteries=frozen,
                      initial_dispatch_mw=dict(init_dispatch or {}))
     try:
-        res = solve_schedule(single, allow_unmet=True)
+        # The independent validator is not injection-aware; the executed arrays are
+        # validated separately against the realized trajectory (see validation.py).
+        res = solve_schedule(single, allow_unmet=True, validate=False,
+                             fixed_battery_mw=injection)
     except Exception:  # noqa: BLE001 - conservative fallback below
         res = None
     if res is None or res.status != "optimal":
-        return _merit_order_recourse(problem, k, realized_demand, realized_avail, soc_now,
-                                     charge=charge, discharge=discharge)
+        fallback = _merit_order_recourse(problem, k, realized_demand, realized_avail, soc_now,
+                                         charge=charge, discharge=discharge)
+        fallback["fallback"] = True
+        fallback["fallback_reason"] = (
+            res.message if res is not None else "realized re-dispatch raised an exception")
+        return fallback
     return {"dispatch": {g: float(v[0]) for g, v in res.dispatch.items()},
             "flows": {l: float(v[0]) for l, v in getattr(res, "flows", {}).items()},
             "charge": {b.id: float(charge.get(b.id, 0.0)) for b in problem.batteries},
             "discharge": {b.id: float(discharge.get(b.id, 0.0)) for b in problem.batteries},
+            "curtailed_mw": {b.id: 0.0 for b in problem.batteries},
+            "curtailed_total_mw": 0.0,
             "soc": {b.id: float(soc_now[b.id]) for b in problem.batteries},
             "unmet": {n: float(v[0]) for n, v in res.unmet.items()}}
 

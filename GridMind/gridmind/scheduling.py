@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 from gridmind.multiperiod import ScheduleProblem
 from gridmind.solver import SolverUnavailableError, resolve_solver, solver_name
@@ -100,11 +100,22 @@ class ScheduleResult:
 
 # ----------------------------------------------------------------- model ----
 def build_schedule_model(problem: ScheduleProblem, allow_unmet: bool = True,
-                         battery_mode: str = "lp") -> Any:
+                         battery_mode: str = "lp",
+                         fixed_battery_mw: Mapping[str, float] | None = None) -> Any:
     """Construct the multi-period model for ``problem`` (already validated).
 
     ``battery_mode="lp"`` builds the historical continuous LP; ``"exclusive"``
-    additionally adds binary charge/discharge exclusivity (a MIP model)."""
+    additionally adds binary charge/discharge exclusivity (a MIP model).
+
+    ``fixed_battery_mw`` optionally injects an *already committed* net battery
+    power at each battery's node as a **constant** in the nodal balance (MW,
+    positive = discharge into the node, negative = charging load). The battery's
+    own decision variables are still present, so callers normally freeze them
+    (``max_charge_mw = max_discharge_mw = 0``) when using this. It is used by the
+    rolling-horizon controller to execute a first-stage storage commitment against
+    realized conditions; because the injection is power (MW), any surplus can be
+    exported over the network instead of being clamped away. Default ``None``
+    leaves the model bit-for-bit unchanged."""
     import pyomo.environ as pyo
 
     battery_mode = normalize_battery_mode(battery_mode)
@@ -198,10 +209,17 @@ def build_schedule_model(problem: ScheduleProblem, allow_unmet: bool = True,
     out_of = {n: [l.id for l in net.lines if l.from_node == n] for n in nodes}
     batts_at = {n: [b.id for b in problem.batteries if b.node == n] for n in nodes}
 
+    fixed_mw = {str(k): float(v) for k, v in (fixed_battery_mw or {}).items()}
+    unknown_fixed = set(fixed_mw) - set(batts)
+    if unknown_fixed:
+        raise ValueError(f"fixed_battery_mw references unknown battery ids: {sorted(unknown_fixed)}")
+    fixed_at = {n: sum(fixed_mw.get(b, 0.0) for b in batts_at[n]) for n in nodes}
+
     def balance(mm: Any, n: str, t: int) -> Any:
         return (sum(mm.p[g, t] for g in gens_at[n])
                 + sum(mm.f[l, t] for l in into[n]) - sum(mm.f[l, t] for l in out_of[n])
                 + sum(mm.dis[b, t] for b in batts_at[n]) - sum(mm.ch[b, t] for b in batts_at[n])
+                + fixed_at[n]
                 + mm.u[n, t]) == mm.demand[n, t]
 
     m.balance = pyo.Constraint(m.N, m.T, rule=balance)
@@ -242,12 +260,19 @@ def _failure(status: str, solver: str, term: str, msg: str, runtime: float,
 
 
 def solve_schedule(problem: ScheduleProblem, *, allow_unmet: bool = True,
-                   validate: bool = True, battery_mode: str = "lp") -> ScheduleResult:
+                   validate: bool = True, battery_mode: str = "lp",
+                   fixed_battery_mw: Mapping[str, float] | None = None) -> ScheduleResult:
     """Build, solve and independently validate a multi-period problem.
 
     ``battery_mode`` is ``"lp"`` (default, continuous relaxation) or
     ``"exclusive"`` (adds binary charge/discharge exclusivity; a verified
-    MIP-capable solver is resolved, with no silent fallback)."""
+    MIP-capable solver is resolved, with no silent fallback).
+
+    ``fixed_battery_mw`` (optional) adds a committed net battery power (MW) per
+    battery as a constant nodal injection; see :func:`build_schedule_model`. The
+    independent validator only knows the battery decision variables, so callers
+    that use a fixed injection must pass ``validate=False`` and validate the
+    *executed* trajectory separately (the controller does exactly this)."""
     strict = not allow_unmet
     try:
         battery_mode = normalize_battery_mode(battery_mode)
@@ -265,7 +290,8 @@ def solve_schedule(problem: ScheduleProblem, *, allow_unmet: bool = True,
     from pyomo.opt import SolverStatus, TerminationCondition
 
     try:
-        model = build_schedule_model(problem, allow_unmet=allow_unmet, battery_mode=battery_mode)
+        model = build_schedule_model(problem, allow_unmet=allow_unmet, battery_mode=battery_mode,
+                                     fixed_battery_mw=fixed_battery_mw)
     except ValueError as exc:
         return _failure("error", name, "model_build_failed", f"invalid schedule problem: {exc}",
                         0.0, problem, strict, battery_mode)
