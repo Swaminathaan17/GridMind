@@ -181,12 +181,18 @@ def test_control_writes_artefact_and_is_reproducible(tmp_path):
     assert "rolling-horizon control" in out
     assert "difference (controller - baseline)" in out
     rec = json.loads((out_a / "control.json").read_text(encoding="utf-8"))
-    assert rec["schema_version"] == 1
+    assert rec["schema_version"] >= 2
     ctrl = rec["controller"]
     assert ctrl["lookahead"] == 4
     assert ctrl["status"] in ("completed", "completed_with_recovery")
     assert ctrl["periods_executed"] == 24
     assert ctrl["solver"]
+    assert ctrl["realized_physical_feasible"] is True
+    assert rec["baseline"]["realized_physical_feasible"] is True
+    assert rec["baseline"]["redispatch_applied"] is True
+    assert len(ctrl.get("realized_demand_mw", [])) == 24
+    assert ctrl.get("problem_sha256")
+    assert rec.get("provenance") or ctrl.get("realized_conditions_sha256")
     # Reproducible: same command into a different dir yields identical decisions.
     _run(*args, "--out", str(out_b))
     assert _strip_timings(rec) == _strip_timings(

@@ -484,11 +484,11 @@ def verify_trajectory(problem: ScheduleProblem, control_result: Any,
 
 # =========================================================== method runners ==
 def _realized_cost_components(problem: ScheduleProblem, t: int, dispatch, unmet, charge,
-                              discharge) -> dict[str, float]:
+                               discharge) -> dict[str, float]:
     net, dt = problem.network, problem.step_hours
-    gen = dt * sum(net.generator(g).cost_per_mwh * v for g, v in dispatch.items())
-    pen = dt * net.unmet_penalty_per_mwh * sum(unmet.values())
-    thr = dt * sum(problem.battery(b).throughput_cost_per_mwh * v for b, v in discharge.items())
+    gen = dt * sum(net.generator(g).cost_per_mwh * v for g, v in (dispatch or {}).items())
+    pen = dt * net.unmet_penalty_per_mwh * sum((unmet or {}).values())
+    thr = dt * sum(problem.battery(b).throughput_cost_per_mwh * v for b, v in (discharge or {}).items())
     return {"generation_cost_usd": gen, "unmet_penalty_cost_usd": pen,
             "battery_throughput_cost_usd": thr, "operating_cost_usd": gen + pen + thr}
 
@@ -612,26 +612,29 @@ def run_method_open_loop(env: StressEnvironment, *, battery_mode: str = "lp",
     dt = truth.step_hours
     gen = pen = thr = 0.0
     unmet_energy = 0.0
-    throughput = 0.0
+    throughput_total = 0.0
     soc_now = {b.id: float(b.initial_soc_mwh) for b in truth.batteries}
     init_dispatch: dict[str, float] = {}
     committed_charge = {b: [float(res.charge[b][t]) for t in range(truth.periods)]
                         for b in res.charge}
     committed_discharge = {b: [float(res.discharge[b][t]) for t in range(truth.periods)]
                            for b in res.discharge}
+    batt_ids = [b.id for b in truth.batteries]
     for t in range(truth.periods):
-        c = {b: committed_charge[b][t] for b in committed_charge}
-        d = {b: committed_discharge[b][t] for b in committed_discharge}
+        c = {b: committed_charge[b][t] for b in batt_ids}
+        d = {b: committed_discharge[b][t] for b in batt_ids}
         plan = _realized_redispatch(truth, t, realized_d, realized_a, soc_now,
                                     charge=c, discharge=d, init_dispatch=init_dispatch)
-        comp = _realized_cost_components(truth, t, plan["dispatch"], plan["unmet"], c, d)
+        exec_c = {b: float((plan.get("charge") or {}).get(b, c[b])) for b in batt_ids}
+        exec_d = {b: float((plan.get("discharge") or {}).get(b, d[b])) for b in batt_ids}
+        comp = _realized_cost_components(truth, t, plan.get("dispatch") or {}, plan.get("unmet") or {}, exec_c, exec_d)
         gen += comp["generation_cost_usd"]
         pen += comp["unmet_penalty_cost_usd"]
         thr += comp["battery_throughput_cost_usd"]
-        unmet_energy += dt * sum(plan["unmet"].values())
-        throughput += dt * sum(d.values())
-        soc_now = _advance(truth, soc_now, c, d, t)
-        init_dispatch = {g: float(v) for g, v in plan["dispatch"].items()}
+        unmet_energy += dt * sum((plan.get("unmet") or {}).values())
+        throughput_total += dt * sum(exec_c[b] + exec_d[b] for b in batt_ids)
+        soc_now = _advance(truth, soc_now, exec_c, exec_d, t)
+        init_dispatch = {g: float(v) for g, v in (plan.get("dispatch") or {}).items()}
     terminal = dict(soc_now)
     total_demand = truth.total_demand_mwh
     return MethodResult(
@@ -640,7 +643,7 @@ def run_method_open_loop(env: StressEnvironment, *, battery_mode: str = "lp",
         generation_cost_usd=gen, unmet_penalty_cost_usd=pen, battery_throughput_cost_usd=thr,
         unmet_energy_mwh=unmet_energy,
         unmet_fraction=(unmet_energy / total_demand) if total_demand > 0 else 0.0,
-        battery_throughput_mwh=throughput,
+        battery_throughput_mwh=throughput_total,
         terminal_soc_deviation_mwh=_terminal_soc_deviation(truth, terminal),
         solve_seconds=res.runtime_seconds)
 
@@ -653,9 +656,11 @@ def run_method_stochastic(env: StressEnvironment, *, risk_weight: float, cvar_al
     Scenarios are generated around the time-0 forecast (causal). The committed
     first-stage battery action is fixed and the remaining periods adapt per scenario
     during evaluation; the policy is then executed against the realized stress
-    conditions. This is a *committed open-loop* stochastic policy, not a receding
-    controller, so it uses no future realized information.
+    conditions. This is a *committed open-loop* stochastic policy (committed
+    first-stage baseline), NOT an adaptive stochastic recourse policy.
     """
+    if lead_periods is None or lead_periods < 0:
+        raise ValueError("lead_periods must be >= 0")
     truth = env.truth_problem
     realized_d, realized_a = env.realized()
     fc_d, fc_a = env.forecast_at(0)
@@ -679,35 +684,61 @@ def run_method_stochastic(env: StressEnvironment, *, risk_weight: float, cvar_al
     # Execute the committed first-stage battery action against realized conditions.
     from gridmind.control import _realized_redispatch
     fs = res.first_stage
-    charge = {b: [float(v) for v in fs["charge"][b]] for b in fs["charge"]}
-    discharge = {b: [float(v) for v in fs["discharge"][b]] for b in fs["discharge"]}
+    if "charge" not in fs or "discharge" not in fs:
+        return MethodResult(method=name, status="error", solver=res.solver,
+                            solve_seconds=res.runtime_seconds,
+                            message="stochastic result missing first-stage charge/discharge arrays")
+    charge_fs = fs["charge"]
+    discharge_fs = fs["discharge"]
+    batt_ids = [b.id for b in truth.batteries]
+    for bid in batt_ids:
+        if bid not in charge_fs or bid not in discharge_fs:
+            raise ValueError(f"missing first-stage actions for battery {bid}")
+    charge = {b: [float(v) for v in charge_fs[b]] for b in charge_fs}
+    discharge = {b: [float(v) for v in discharge_fs[b]] for b in discharge_fs}
+    for b in batt_ids:
+        if len(charge[b]) == 0 or len(discharge[b]) == 0:
+            raise ValueError(f"empty first-stage action arrays for battery {b}")
+        if lead_periods > 0 and len(charge[b]) < lead_periods:
+            raise ValueError(f"incomplete first-stage action arrays for battery {b} (need {lead_periods}, got {len(charge[b])})")
     soc_now = {b.id: float(b.initial_soc_mwh) for b in truth.batteries}
     gen = pen = thr = 0.0
     unmet_energy = 0.0
     dt = truth.step_hours
     init_dispatch: dict[str, float] = {}
+    total_charge_exec = {b: 0.0 for b in batt_ids}
+    total_discharge_exec = {b: 0.0 for b in batt_ids}
     for t in range(truth.periods):
-        idx = t if t < lead_periods else 0
-        c = {b: charge[b][idx] if idx < len(charge[b]) else 0.0 for b in charge}
-        d = {b: discharge[b][idx] if idx < len(discharge[b]) else 0.0 for b in discharge}
+        if t < lead_periods:
+            c = {b: float(charge[b][t]) if t < len(charge[b]) else 0.0 for b in batt_ids}
+            d = {b: float(discharge[b][t]) if t < len(discharge[b]) else 0.0 for b in batt_ids}
+        else:
+            c = {b: 0.0 for b in batt_ids}
+            d = {b: 0.0 for b in batt_ids}
         plan = _realized_redispatch(truth, t, realized_d, realized_a, soc_now,
                                     charge=c, discharge=d, init_dispatch=init_dispatch)
-        comp = _realized_cost_components(truth, t, plan["dispatch"], plan["unmet"], c, d)
+        exec_c = {b: float((plan.get("charge") or {}).get(b, c[b])) for b in batt_ids}
+        exec_d = {b: float((plan.get("discharge") or {}).get(b, d[b])) for b in batt_ids}
+        comp = _realized_cost_components(truth, t, plan.get("dispatch") or {}, plan.get("unmet") or {}, exec_c, exec_d)
         gen += comp["generation_cost_usd"]
         pen += comp["unmet_penalty_cost_usd"]
         thr += comp["battery_throughput_cost_usd"]
-        unmet_energy += dt * sum(plan["unmet"].values())
-        soc_now = _advance(truth, soc_now, c, d, t)
-        init_dispatch = {g: float(v) for g, v in plan["dispatch"].items()}
+        unmet_energy += dt * sum((plan.get("unmet") or {}).values())
+        for b in batt_ids:
+            total_charge_exec[b] += exec_c[b]
+            total_discharge_exec[b] += exec_d[b]
+        soc_now = _advance(truth, soc_now, exec_c, exec_d, t)
+        init_dispatch = {g: float(v) for g, v in (plan.get("dispatch") or {}).items()}
     terminal = dict(soc_now)
     total_demand = truth.total_demand_mwh
+    throughput_total_mwh = dt * sum(total_charge_exec[b] + total_discharge_exec[b] for b in batt_ids)
     return MethodResult(
         method=name, status="optimal", solver=res.solver,
         realized_operating_cost_usd=gen + pen + thr,
         generation_cost_usd=gen, unmet_penalty_cost_usd=pen, battery_throughput_cost_usd=thr,
         unmet_energy_mwh=unmet_energy,
         unmet_fraction=(unmet_energy / total_demand) if total_demand > 0 else 0.0,
-        battery_throughput_mwh=dt * sum(sum(discharge[b]) for b in discharge),
+        battery_throughput_mwh=throughput_total_mwh,
         terminal_soc_deviation_mwh=_terminal_soc_deviation(truth, terminal),
         solve_seconds=res.runtime_seconds)
 
@@ -715,10 +746,20 @@ def run_method_stochastic(env: StressEnvironment, *, risk_weight: float, cvar_al
 def _advance(problem: ScheduleProblem, soc_now: Mapping[str, float], charge: Mapping[str, float],
              discharge: Mapping[str, float], t: int) -> dict[str, float]:
     dt = problem.step_hours
+    from gridmind.validation import DEFAULT_TOL
     out = dict(soc_now)
     for b in problem.batteries:
-        nxt = (soc_now[b.id] + b.eta_charge * float(charge.get(b.id, 0.0)) * dt
-               - float(discharge.get(b.id, 0.0)) * dt / b.eta_discharge)
-        out[b.id] = float(min(b.capacity_mwh, max(b.min_soc_mwh, nxt)))
+        c = float(charge.get(b.id, 0.0))
+        d = float(discharge.get(b.id, 0.0))
+        if c < -DEFAULT_TOL or d < -DEFAULT_TOL:
+            raise ValueError(f"negative charge/discharge for battery {b.id} at period {t}")
+        if c > b.max_charge_mw + DEFAULT_TOL or d > b.max_discharge_mw + DEFAULT_TOL:
+            raise ValueError(f"charge/discharge exceeds power bounds for battery {b.id} at period {t}")
+        if c > DEFAULT_TOL and d > DEFAULT_TOL:
+            raise ValueError(f"simultaneous charge and discharge for battery {b.id} at period {t} in exclusive-required transition")
+        nxt = (float(soc_now[b.id]) + b.eta_charge * c * dt - d * dt / b.eta_discharge)
+        if nxt < b.min_soc_mwh - DEFAULT_TOL or nxt > b.capacity_mwh + DEFAULT_TOL:
+            raise ValueError(f"SoC out of bounds for battery {b.id} at period {t} after transition")
+        out[b.id] = float(nxt)
     return out
 

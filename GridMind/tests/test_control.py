@@ -420,6 +420,106 @@ def test_control_result_to_dict_roundtrip_fields():
                 "periods_executed", "steps", "realized_operating_cost_usd",
                 "realized_unmet_energy_mwh", "realized_battery_throughput_mwh",
                 "realized_cvar_usd", "mean_solve_seconds", "max_solve_seconds",
-                "failed_replans", "schema_version", "ok"):
+                "failed_replans", "schema_version", "ok",
+                "realized_battery_curtailed_mwh", "realized_battery_charge_curtailed_mwh",
+                "realized_renewable_curtailed_mwh", "realized_var_usd",
+                "realized_cvar_alpha", "realized_cvar_basis",
+                "realized_cost_observations_usd", "realized_validation",
+                "realized_physical_feasible", "realized_conditions_sha256", "config",
+                "execution_fallbacks"):
         assert key in d
+    assert d["schema_version"] == CONTROL_SCHEMA_VERSION >= 2
+    assert d["realized_physical_feasible"] is True
+    assert d["realized_validation"]["physical_feasible"] is True
+    assert d["realized_cvar_basis"] == "per_period_realized_operating_cost_uniform_weights"
+    assert d["realized_cvar_alpha"] == pytest.approx(0.95)
+    assert len(d["realized_cost_observations_usd"]) == 5
+    assert d["realized_var_usd"] <= d["realized_cvar_usd"]
+    assert len(d["realized_conditions_sha256"]) == 64
+    assert len(d.get("realized_demand_mw", [])) == 5
+    assert len(d.get("realized_availability_mw", [])) == 5
+    assert d.get("problem_sha256")
+    assert d.get("initial_soc_mwh")
+    assert d["config"]["lookahead"] == 2
     assert isinstance(d["steps"], list) and len(d["steps"]) == 5
+
+
+# ============================================== Stage 5B audit regressions =====
+@needs_solver
+def test_controller_independently_validates_executed_trajectory():
+    """Every recorded execution must be independently feasible at realized inputs."""
+    prob = control_problem(periods=6)
+    res = run_rolling_horizon(prob, ControlConfig(lookahead=3, seed=11))
+    assert res.realized_physical_feasible is True
+    assert res.realized_validation is not None
+    assert res.realized_validation["physical_feasible"] is True
+    assert not [c for c in res.realized_validation["checks"]
+                if not c["passed"] and c["category"] == "physical"]
+    assert res.execution_fallbacks == 0
+    for step in res.steps:
+        assert step.executed["fallback"] is False
+        assert "battery_charge_curtailed_mw" in step.executed
+        assert "renewable_curtailed_mw" in step.executed
+
+
+@needs_solver
+def test_open_loop_baseline_is_redispatched_not_credited_with_infeasible_plan():
+    """The forecast-fixed schedule is re-dispatched at realized conditions.
+
+    Executing the as-planned dispatch against different realized demand violates
+    power balance; the record keeps that diagnostic but does not use its cost as
+    the fair comparison.
+    """
+    prob = control_problem(periods=6)
+    base = run_open_loop_baseline(
+        prob, config=ControlConfig(demand_sigma=0.05, renewable_sigma=0.0, seed=7))
+    assert base.status == "optimal"
+    assert base.redispatch_applied is True
+    assert base.planned_physical_feasible is False
+    assert base.realized_physical_feasible is True
+    assert base.realized_validation["physical_feasible"] is True
+    assert base.planned_operating_cost_usd is not None
+    assert base.realized_operating_cost_usd is not None
+    assert base.planned_operating_cost_usd != pytest.approx(
+        base.realized_operating_cost_usd)
+    assert "re-dispatched" in base.message
+    assert len(base.realized_cost_observations_usd) == prob.periods
+    assert base.realized_cvar_basis == "per_period_realized_operating_cost_uniform_weights"
+
+
+def test_realized_redispatch_curtails_committed_charge_before_leaving_unmet():
+    """A first-stage charge must not be served by leaving demand unserved."""
+    from gridmind.control import _realized_redispatch
+
+    net = Network(name="charge", nodes=(Node("bus", "bus"),),
+                  generators=(Generator("g", "G", "bus", "gas", 10.0, 10.0),),
+                  lines=(), unmet_penalty_per_mwh=5000.0)
+    hor = Horizon(periods=1, step_hours=1.0,
+                  demand_mw=({"bus": 10.0},),
+                  availability_mw=({"g": 10.0},),
+                  generator_online=({"g": True},),
+                  line_in_service=({},))
+    bat = Battery("b1", "bus", capacity_mwh=20.0, max_charge_mw=5.0,
+                  max_discharge_mw=5.0, initial_soc_mwh=0.0)
+    prob = ScheduleProblem(network=net, horizon=hor, batteries=(bat,))
+    res = _realized_redispatch(prob, 0, hor.demand_mw, hor.availability_mw, {"b1": 0.0},
+                               charge={"b1": 5.0}, discharge={"b1": 0.0},
+                               init_dispatch={"g": 10.0})
+    assert res.get("fallback") is not True
+    assert res["dispatch"]["g"] == pytest.approx(10.0, abs=1e-6)
+    assert res["charge"]["b1"] == pytest.approx(0.0, abs=1e-6)
+    assert res["battery_charge_curtailed_mw"]["b1"] == pytest.approx(5.0, abs=1e-6)
+    assert res["battery_charge_curtailed_total_mw"] == pytest.approx(5.0, abs=1e-6)
+    assert sum(res["unmet"].values()) == pytest.approx(0.0, abs=1e-6)
+    assert res["validation"]["physical_feasible"] is True
+
+
+def test_validation_feasibility_is_mode_aware_for_exclusivity():
+    """LP permits simultaneous charge/discharge; exclusive mode does not."""
+    from gridmind.control import _validation_feasible
+    from gridmind.validation import ValidationReport
+
+    report = ValidationReport(passed=False, checks=[], physical_feasible=True,
+                              model_valid=True, battery_exclusive=False)
+    assert _validation_feasible(report, "lp") is True
+    assert _validation_feasible(report, "exclusive") is False

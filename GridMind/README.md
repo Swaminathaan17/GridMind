@@ -300,10 +300,10 @@ python -m gridmind experiment --battery-mode exclusive              # MIP batter
 # Stage 5B: rolling-horizon control vs a fixed open-loop schedule (receding horizon)
 python -m gridmind control                                          # look-ahead 6, deterministic, LP
 python -m gridmind control --lookahead 8 --seed 20260201            # longer look-ahead, fixed seed
-python -m gridmind control --mode stochastic --scenarios 20 --risk-weight 0.7
+python -m gridmind control --mode stochastic --scenarios 20 --risk-weight 0.5
 python -m gridmind control --battery-mode exclusive                 # MIP exclusivity per replan
 python -m gridmind control --failure-policy abort                   # stop on the first failed replan
-python -m gridmind control --out results\stage5b_control            # machine-readable JSON record
+python -m gridmind control --out results\stage5b_audited            # machine-readable JSON record
 ```
 
 `scenarios` lists both families (single-period ids like `peak_demand`, horizon ids prefixed `h-`).
@@ -397,28 +397,47 @@ Protocol (why the comparison is fair and non-clairvoyant):
 
 Reported metrics (both controller and baseline, same realization): realized operating cost, unserved
 energy, battery throughput, realized CVaR at `--cvar-confidence`, per-step and mean/max solve time,
-executed periods and failed/recovered replan counts, and the controller-minus-baseline differences.
+executed periods and failed/recovered/fell-back replan counts, power/energy curtailment, and the
+controller-minus-baseline differences. The controller record also includes an **independent**
+`verify_executed_trajectory` report over the actual executed arrays at realized inputs.
+
+The reported CVaR is explicitly a **per-period realized operating-cost CVaR with uniform weights**
+(`realized_cvar_basis = "per_period_realized_operating_cost_uniform_weights"`), not the scenario CVaR
+used inside the stochastic planner. `realized_var_usd`, `realized_cvar_alpha` and the full list of
+period observations are recorded so the metric can be reproduced.
+
+**Fair baseline.** The open-loop schedule is still optimised on the time-0 forecast and its battery
+action is held fixed, but generator dispatch is re-optimised at realized conditions exactly as the
+controller's is. The record keeps the old as-planned cost/validation under `planned_*` (for
+transparency) but the comparison uses `realized_*`. Executing the as-planned generator dispatch
+against different realized demand is generally **not physically feasible**, so its cost must not be
+used as a counterfactual.
 
 Honest reading of the measured results (author's environment, HiGHS, `data/sample_horizon.json`,
-look-ahead 6, seed 20260201, sigmas 0.06/0.12):
+look-ahead 6, seed 20260201, sigmas 0.06/0.12). Both sides are feasible at realized inputs:
 
 | Run | controller cost | baseline cost | Δ cost | Δ unmet | Δ CVaR |
 | --- | --- | --- | --- | --- | --- |
-| deterministic, LP | 580,446.80 | 580,444.10 | **+2.71** | 0.00 | +9.45 |
-| deterministic, exclusive | 580,755.01 | 580,444.10 | +310.92 | 0.00 | +967.98 |
-| stochastic, LP (12 scenarios, rw 0.7) | 604,475.84 | 580,444.10 | +24,031.75 | 0.00 | +6,971.61 |
+| deterministic, LP | 599,839.25 | 599,069.98 | **+769.27** | 0.00 | +1,828.48 |
+| deterministic, exclusive | 600,773.28 | 600,028.26 | +745.02 | 0.00 | +1,382.35 |
+| stochastic, LP (20 scenarios, rw 0.5) | 600,162.11 | 599,069.98 | +1,092.12 | 0.00 | +4,618.72 |
 
 The controller is **not better** than the open-loop baseline here: it is slightly worse, and the
-risk-averse stochastic mode is markedly more expensive. This is the expected outcome - the open-loop
-plan is solved with the full horizon and perfect terminal condition, while the controller sees only a
-short forecast window and re-plans under error. The controller **reproduces the open-loop optimum
-exactly** when the look-ahead spans the whole horizon and there is no forecast error (certainty
-equivalence), and is strictly worse when the look-ahead is too short to prepare for a demand ramp -
-both are asserted in the test suite. No superiority claim is made anywhere.
+risk-averse stochastic mode is more expensive. This is the expected outcome - the open-loop plan is
+solved with the full horizon and perfect terminal condition, while the controller sees only a short
+forecast window and re-plans under error. The controller **reproduces the open-loop optimum exactly**
+when the look-ahead spans the whole horizon and there is no forecast error (certainty equivalence),
+and is strictly worse when the look-ahead is too short to prepare for a demand ramp - both are
+asserted in the test suite. No superiority claim is made anywhere.
+
+Historical Stage 5B artefacts under `results/stage5b_control/` predate realized re-dispatch: their
+`executed` arrays equal the planned arrays and their baseline cost is the infeasible as-planned
+dispatch. They are **not** valid comparisons and are never overwritten. The audited rerun lives under
+`results/stage5b_audited/`.
 
 Artefacts (`--out <dir>`; default writes nothing unless `--out`/`--json` is given): `<name>.json` with
 the full comparison record (both `controller` and `baseline` sub-records plus the differences),
-schema-versioned (`CONTROL_SCHEMA_VERSION = 1`). Stage 5A outputs under `results/stage5a_benchmark/`
+schema-versioned (`CONTROL_SCHEMA_VERSION = 2`). Stage 5A outputs under `results/stage5a_benchmark/`
 are never touched.
 
 ## Baseline and units
@@ -441,7 +460,7 @@ network** (they are references, not deployable schedules):
 
 ## Verification status (read this)
 
-* 177 tests: solver-free tests (data model, scenarios, determinism, validator, baselines, failure
+* 184 tests: solver-free tests (data model, scenarios, determinism, validator, baselines, failure
   handling, scenario generation, model structure, CVaR/VaR metrics, experiment statistics, control
   forecast model) plus solver tests for both models, the stochastic layer, the comparative benchmark
   and the rolling-horizon controller. Solver tests skip with a reason when no solver is found.
@@ -457,7 +476,7 @@ network** (they are references, not deployable schedules):
   "pure-CVaR in-sample CVaR <= risk-neutral CVaR", "wait-and-see expected cost <= committed expected
   cost", non-anticipativity equalities across scenarios, and infeasible scenarios returning no numbers.
 * The author's environment: Python 3.11 venv, pyomo 6.10.1, highspy (appsi_highs); the full suite
-  (177 tests) passes with HiGHS. Same seed => same scenarios and objectives across runs and solvers.
+  (184 tests) passes with HiGHS. Same seed => same scenarios and objectives across runs and solvers.
 * Stage 5A benchmark integrity is tested: two runs of the same seeds produce byte-identical
   `experiment_config.json` and `per_scenario_metrics.csv` (only wall-clock timings differ); all three
   policies are asserted to evaluate the **same** holdout scenario ids; missing/failed policies are
@@ -469,7 +488,10 @@ network** (they are references, not deployable schedules):
   (no fabricated plan/objective on failure), LP and MIP exclusivity, stochastic execution with no
   fabricated unserved energy, the certainty-equivalence result (full look-ahead, no noise => matches
   the open-loop optimum), myopic-worse-than-open-loop, schema/round-trip, and CLI artefact
-  reproducibility.
+  reproducibility. An independent `verify_executed_trajectory` check now runs over every controller
+  and baseline execution; regression tests cover executed-trajectory feasibility, charge curtailment
+  before unmet demand, mode-aware LP/exclusive feasibility, and the re-dispatched (not as-planned)
+  baseline comparison.
 
 ## Assumptions and limitations
 

@@ -73,9 +73,11 @@ taken from an optimization objective, so a failed plan cannot inflate or hide co
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -89,6 +91,7 @@ from gridmind.scheduling import (
 from gridmind.solver import SolverUnavailableError, resolve_solver
 from gridmind.stochastic import RiskConfig, solve_stochastic
 from gridmind.uncertainty import ScenarioSet, UncertaintyScenario
+from gridmind.validation import verify_executed_trajectory
 
 CLEAN_EPS = 1e-9
 
@@ -99,7 +102,15 @@ CONTROLLER_MODES: tuple[str, ...] = ("deterministic", "stochastic")
 FAILURE_POLICIES: tuple[str, ...] = ("hold", "abort")
 
 #: version of the controller record schema
-CONTROL_SCHEMA_VERSION = 1
+#:
+#: Version 2 added executed-trajectory validation, the full controller config,
+#: realized-condition inputs (hash + rows), explicit battery/renewable curtailment
+#: and the CVaR basis/observations. Version 3 stores the realized demand and
+#: availability rows themselves (not only their hash), the problem fingerprint and
+#: the carried initial state, so an external auditor can reproduce the check
+#: without trusting this process. All keys are additive; older records remain
+#: readable and are never rewritten.
+CONTROL_SCHEMA_VERSION = 3
 
 
 # ---------------------------------------------------------------- errors ----
@@ -252,6 +263,7 @@ class ControlStep:
     realized_cost_usd: float | None = None   # independent recompute for this period
     battery_soc_mwh: dict[str, float] = field(default_factory=dict)  # SoC after executing
     failure_recovered: bool = False
+    execution_fallback: bool = False         # network-aware recourse failed, local fallback ran
     recovery_note: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -272,21 +284,42 @@ class ControlResult:
     realized_operating_cost_usd: float = 0.0
     realized_unmet_energy_mwh: float = 0.0
     realized_battery_throughput_mwh: float = 0.0
+    realized_battery_curtailed_mwh: float = 0.0
+    realized_battery_charge_curtailed_mwh: float = 0.0
+    realized_renewable_curtailed_mwh: float = 0.0
     realized_cvar_usd: float | None = None
+    realized_var_usd: float | None = None
+    realized_cvar_alpha: float | None = None
+    realized_cvar_basis: str = "per_period_realized_operating_cost"
+    realized_cost_observations_usd: list[float] = field(default_factory=list)
+    realized_validation: Any | None = None
+    realized_physical_feasible: bool | None = None
+    realized_conditions_sha256: str = ""
+    realized_demand_mw: list[dict[str, float]] = field(default_factory=list)
+    realized_availability_mw: list[dict[str, float]] = field(default_factory=list)
+    problem_sha256: str = ""
+    initial_soc_mwh: dict[str, float] = field(default_factory=dict)
+    initial_dispatch_mw: dict[str, float] = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
     mean_solve_seconds: float = 0.0
     max_solve_seconds: float = 0.0
     failed_replans: int = 0
     recovered_replans: int = 0
+    execution_fallbacks: int = 0
     schema_version: int = CONTROL_SCHEMA_VERSION
     message: str = ""
 
     @property
     def ok(self) -> bool:
-        return self.periods_executed == len(self.steps) and self.status in ("completed", "completed_with_recovery")
+        return (self.periods_executed == len(self.steps)
+                and self.status in ("completed", "completed_with_recovery")
+                and self.realized_physical_feasible is not False)
 
     def to_dict(self) -> dict[str, Any]:
         d = {k: v for k, v in vars(self).items() if k != "steps"}
         d["steps"] = [s.to_dict() for s in self.steps]
+        if self.realized_validation is not None and hasattr(self.realized_validation, "to_dict"):
+            d["realized_validation"] = self.realized_validation.to_dict()
         d["ok"] = self.ok
         return d
 
@@ -301,6 +334,58 @@ def _clamp_soc(battery: Battery, soc: float) -> float:
     same bounds on every window).
     """
     return float(min(battery.capacity_mwh, max(battery.min_soc_mwh, soc)))
+
+
+def _conditions_sha256(demand: Sequence[Mapping[str, float]],
+                       avail: Sequence[Mapping[str, float]]) -> str:
+    """Stable fingerprint of the realized inputs used by a controller/baseline run."""
+    payload = json.dumps({"demand_mw": [dict(row) for row in demand],
+                          "availability_mw": [dict(row) for row in avail]},
+                         sort_keys=True, separators=(",", ":"), default=float)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _problem_sha256(problem: ScheduleProblem) -> str:
+    """Stable fingerprint of the physical problem (network + horizon + state).
+
+    The realized-condition hash alone is insufficient provenance: an auditor also
+    needs to know which network, costs, ramps, outages and initial state were used.
+    This hash covers all of them; the full data files remain the source of truth.
+    """
+    payload = json.dumps({"network": problem.network.to_dict(),
+                          "problem": problem.to_dict()},
+                         sort_keys=True, separators=(",", ":"), default=float)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _first_periods_problem(problem: ScheduleProblem, periods: int) -> ScheduleProblem:
+    """Restrict a problem to its first ``periods`` periods (for aborted runs)."""
+    if periods >= problem.periods:
+        return problem
+    horizon = problem.horizon
+    return replace(problem, horizon=replace(
+        horizon, periods=int(periods),
+        demand_mw=tuple(horizon.demand_mw[:periods]),
+        availability_mw=tuple(horizon.availability_mw[:periods]),
+        generator_online=tuple(horizon.generator_online[:periods]),
+        line_in_service=tuple(horizon.line_in_service[:periods])))
+
+
+def _validation_feasible(report: Any, battery_mode: str) -> bool:
+    """Whether a validation report supports physical feasibility for ``battery_mode``.
+
+    ``validate_schedule`` records the charge/discharge exclusivity diagnostic as a
+    regular failed check. That is a real constraint in ``exclusive`` mode, but the
+    LP relaxation intentionally permits simultaneous charge/discharge (see the
+    README's "simultaneity" note), so an LP execution must not be declared
+    physically infeasible solely because of that diagnostic.
+    """
+    if report is None:
+        return False
+    physical = report.physical_feasible is not False
+    model = report.model_valid is not False
+    exclusive = True if battery_mode != "exclusive" else report.battery_exclusive is not False
+    return bool(physical and model and exclusive)
 
 
 def _build_window_problem(problem: ScheduleProblem, k: int, lookahead: int,
@@ -376,14 +461,15 @@ def _period_realized_cost(problem: ScheduleProblem, t: int, dispatch: Mapping[st
 def _advance_soc(problem: ScheduleProblem, soc_now: Mapping[str, float], t: int,
                  charge: Mapping[str, float], discharge: Mapping[str, float]
                  ) -> dict[str, float]:
-    """Advance each battery's SoC by one executed period."""
+    """Advance each battery's SoC by one executed period.
+
+    Deliberately un-clamped: the executed trajectory must expose any SoC-bound
+    violation to independent validation instead of silently flattening it.
+    """
     dt = problem.step_hours
-    out: dict[str, float] = {}
-    for b in problem.batteries:
-        prev = float(soc_now[b.id])
-        out[b.id] = _clamp_soc(b, float(prev + b.eta_charge * charge[b.id] * dt
-                                        - discharge[b.id] * dt / b.eta_discharge))
-    return out
+    return {b.id: float(soc_now[b.id] + b.eta_charge * charge[b.id] * dt
+                        - discharge[b.id] * dt / b.eta_discharge)
+            for b in problem.batteries}
 
 
 def _safe_hold_dispatch(problem: ScheduleProblem, t: int, demand: Sequence[Mapping[str, float]],
@@ -431,41 +517,84 @@ def _merit_order_recourse(problem: ScheduleProblem, t: int,
     unmet: dict[str, float] = {}
     eff_charge = {b.id: float(charge.get(b.id, 0.0)) for b in problem.batteries}
     eff_discharge = {b.id: float(discharge.get(b.id, 0.0)) for b in problem.batteries}
-    curtailed = {b.id: 0.0 for b in problem.batteries}
+    curtailed_discharge = {b.id: 0.0 for b in problem.batteries}
+    curtailed_charge = {b.id: 0.0 for b in problem.batteries}
     for n in net.nodes:
         node_batts = [b for b in problem.batteries if b.node == n.id]
         ch_at = sum(eff_charge[b.id] for b in node_batts)
         dis_at = sum(eff_discharge[b.id] for b in node_batts)
-        # Power balance is in MW: a battery injects (discharge - charge) directly.
-        need = float(demand_row[n.id]) - (dis_at - ch_at)
-        if need < 0.0:
-            # Surplus = discharge beyond local demand + charging load. Local
-            # recourse cannot export it, so explicitly curtail the excess discharge.
-            deliverable = dis_at + need  # == demand + charge_at
-            scale = deliverable / dis_at if dis_at > 0.0 else 0.0
-            for b in node_batts:
-                new_dis = eff_discharge[b.id] * scale
-                curtailed[b.id] += eff_discharge[b.id] - new_dis
-                eff_discharge[b.id] = new_dis
-            need = 0.0
+        demand_n = float(demand_row[n.id])
         local = sorted((g for g in net.generators if g.node == n.id),
                        key=lambda g: (g.cost_per_mwh, g.id))
+        gen_limits = {
+            g.id: max(0.0, min(g.capacity_mw, float(avail_row[g.id])))
+            for g in local if online[g.id]
+        }
+        max_gen = sum(gen_limits.values())
+
+        # Demand has priority over charging. Battery discharge first offsets demand;
+        # any discharge surplus may serve the committed charging load, and only the
+        # remainder is curtailed (local recourse has no export). Charging that cannot
+        # be served by discharge surplus or local generation is curtailed explicitly
+        # rather than being reported as unserved *demand*.
+        net_demand = demand_n - dis_at
+        ch_served = 0.0
+        if net_demand <= 0.0:
+            surplus = -net_demand
+            served_from_discharge = min(ch_at, surplus)
+            ch_served += served_from_discharge
+            surplus_left = surplus - served_from_discharge
+            if surplus_left > 0.0 and dis_at > 0.0:
+                deliverable = max(0.0, dis_at - surplus_left)
+                scale = deliverable / dis_at
+                for b in node_batts:
+                    new_dis = eff_discharge[b.id] * scale
+                    curtailed_discharge[b.id] += eff_discharge[b.id] - new_dis
+                    eff_discharge[b.id] = new_dis
+            ch_remaining = max(0.0, ch_at - ch_served)
+            served_from_generation = min(ch_remaining, max_gen)
+            ch_served += served_from_generation
+            gen_needed = served_from_generation
+        else:
+            gen_for_demand = min(net_demand, max_gen)
+            remaining_gen = max(0.0, max_gen - gen_for_demand)
+            if remaining_gen > 0.0:
+                ch_served = min(ch_at, remaining_gen)
+            gen_needed = gen_for_demand + ch_served
+
+        # Apply any charging curtailment proportionally across the node's batteries.
+        ch_curtailed_at_node = max(0.0, ch_at - ch_served)
+        if ch_curtailed_at_node > 0.0 and ch_at > 0.0:
+            scale_ch = ch_served / ch_at
+            for b in node_batts:
+                new_ch = eff_charge[b.id] * scale_ch
+                curtailed_charge[b.id] += eff_charge[b.id] - new_ch
+                eff_charge[b.id] = new_ch
+
+        need = gen_needed
         for g in local:
             if need <= CLEAN_EPS:
                 break
-            if not online[g.id]:
+            if g.id not in gen_limits:
                 continue
-            limit = max(0.0, min(g.capacity_mw, float(avail_row[g.id])))
-            take = min(limit, need)
+            take = min(gen_limits[g.id], need)
             dispatch[g.id] = take
             need -= take
         unmet[n.id] = max(0.0, need)
+    curtailed_dis_total = float(sum(curtailed_discharge.values()))
+    curtailed_ch_total = float(sum(curtailed_charge.values()))
     return {"dispatch": dispatch,
             "flows": {},
             "charge": eff_charge,
             "discharge": eff_discharge,
-            "curtailed_mw": curtailed,
-            "curtailed_total_mw": float(sum(curtailed.values())),
+            # Per-period MW (not accumulated energy). Version-1 names retained as
+            # aliases; the explicit battery_* keys are the documented surface.
+            "curtailed_mw": curtailed_discharge,
+            "curtailed_total_mw": curtailed_dis_total,
+            "battery_curtailed_mw": curtailed_discharge,
+            "battery_curtailed_total_mw": curtailed_dis_total,
+            "battery_charge_curtailed_mw": curtailed_charge,
+            "battery_charge_curtailed_total_mw": curtailed_ch_total,
             "soc": {b.id: float(soc_now[b.id]) for b in problem.batteries}, "unmet": unmet}
 
 
@@ -475,7 +604,8 @@ def _realized_redispatch(problem: ScheduleProblem, k: int,
                          soc_now: Mapping[str, float],
                          *, charge: Mapping[str, float],
                          discharge: Mapping[str, float],
-                         init_dispatch: Mapping[str, float] | None = None) -> dict[str, Any]:
+                         init_dispatch: Mapping[str, float] | None = None,
+                         battery_mode: str = "lp") -> dict[str, Any]:
     """Serve period ``k`` at REALIZED conditions with the committed battery action.
 
     The committed battery charge/discharge is a **power** (MW) injection at its
@@ -496,9 +626,10 @@ def _realized_redispatch(problem: ScheduleProblem, k: int,
     from gridmind.scheduling import solve_schedule
     net = problem.network
     dt = problem.step_hours
-    node_ids = [n.id for n in net.nodes]
-    injection = {b.id: float(discharge.get(b.id, 0.0)) - float(charge.get(b.id, 0.0))
-                 for b in problem.batteries}
+    batteries = tuple(problem.batteries)
+    charge_remaining = {b.id: float(charge.get(b.id, 0.0)) for b in batteries}
+    discharge_fixed = {b.id: float(discharge.get(b.id, 0.0)) for b in batteries}
+    charge_curtailed = {b.id: 0.0 for b in batteries}
     one = Horizon(
         periods=1, step_hours=dt,
         demand_mw=(dict(realized_demand[k]),),
@@ -507,31 +638,119 @@ def _realized_redispatch(problem: ScheduleProblem, k: int,
         line_in_service=(dict(problem.horizon.line_in_service[k]),))
     frozen = tuple(replace(b, initial_soc_mwh=_clamp_soc(b, float(soc_now[b.id])),
                            max_charge_mw=0.0, max_discharge_mw=0.0, final_soc_mwh=None)
-                   for b in problem.batteries)
+                   for b in batteries)
     single = replace(problem, horizon=one, batteries=frozen,
                      initial_dispatch_mw=dict(init_dispatch or {}))
-    try:
-        # The independent validator is not injection-aware; the executed arrays are
-        # validated separately against the realized trajectory (see validation.py).
-        res = solve_schedule(single, allow_unmet=True, validate=False,
-                             fixed_battery_mw=injection)
-    except Exception:  # noqa: BLE001 - conservative fallback below
-        res = None
-    if res is None or res.status != "optimal":
+    validation_problem = replace(
+        problem, horizon=one,
+        batteries=tuple(replace(b, initial_soc_mwh=_clamp_soc(b, float(soc_now[b.id])),
+                                final_soc_mwh=None) for b in batteries),
+        initial_dispatch_mw=dict(init_dispatch or {}))
+
+    def _fallback(reason: str) -> dict[str, Any]:
         fallback = _merit_order_recourse(problem, k, realized_demand, realized_avail, soc_now,
-                                         charge=charge, discharge=discharge)
+                                         charge=charge_remaining, discharge=discharge_fixed)
+        for b in batteries:
+            fallback["battery_charge_curtailed_mw"][b.id] += charge_curtailed[b.id]
+            fallback["battery_charge_curtailed_total_mw"] += charge_curtailed[b.id]
+        fallback["battery_charge_curtailed_mw"] = dict(fallback["battery_charge_curtailed_mw"])
         fallback["fallback"] = True
-        fallback["fallback_reason"] = (
-            res.message if res is not None else "realized re-dispatch raised an exception")
+        fallback["fallback_reason"] = reason
         return fallback
-    return {"dispatch": {g: float(v[0]) for g, v in res.dispatch.items()},
-            "flows": {l: float(v[0]) for l, v in getattr(res, "flows", {}).items()},
-            "charge": {b.id: float(charge.get(b.id, 0.0)) for b in problem.batteries},
-            "discharge": {b.id: float(discharge.get(b.id, 0.0)) for b in problem.batteries},
-            "curtailed_mw": {b.id: 0.0 for b in problem.batteries},
+
+    res = None
+    res_validation = None
+    # Committed charging is an economic decision, not a must-run load: if serving
+    # it would create unserved demand at a node, reduce that node's charging and
+    # re-dispatch. The curtailment is explicit and reported (never silently hidden).
+    for _attempt in range(1 + len(net.nodes) + len(batteries)):
+        injection = {b.id: discharge_fixed[b.id] - charge_remaining[b.id] for b in batteries}
+        try:
+            res = solve_schedule(single, allow_unmet=True, validate=False,
+                                 fixed_battery_mw=injection)
+        except Exception:  # noqa: BLE001 - conservative fallback below
+            res = None
+        if res is None or res.status != "optimal":
+            break
+
+        reduced_any = False
+        for n in net.nodes:
+            unmet_n = float(res.unmet.get(n.id, [0.0])[0])
+            if unmet_n <= CLEAN_EPS:
+                continue
+            node_batts = [b for b in batteries if b.node == n.id]
+            total_charge = sum(charge_remaining[b.id] for b in node_batts)
+            if total_charge <= CLEAN_EPS:
+                continue
+            reduce = min(total_charge, unmet_n)
+            scale = (total_charge - reduce) / total_charge
+            for b in node_batts:
+                new_charge = charge_remaining[b.id] * scale
+                charge_curtailed[b.id] += charge_remaining[b.id] - new_charge
+                charge_remaining[b.id] = new_charge
+            reduced_any = True
+        if not reduced_any:
+            break
+
+    if res is None or res.status != "optimal":
+        return _fallback(
+            res.message if res is not None else "realized re-dispatch raised an exception")
+
+    # If an iteration cap was hit while a node still has both unserved demand and
+    # committed charging, do not leave the charge decision half-resolved: the local
+    # merit-order fallback gives demand strict priority and curtails charge only at
+    # the affected node.
+    stuck = False
+    for n in net.nodes:
+        if float(res.unmet.get(n.id, [0.0])[0]) <= CLEAN_EPS:
+            continue
+        if sum(charge_remaining[b.id] for b in batteries if b.node == n.id) > CLEAN_EPS:
+            stuck = True
+            break
+    if stuck:
+        return _fallback("charge curtailment did not converge while demand was unserved")
+
+    dispatch = {g: float(v[0]) for g, v in res.dispatch.items()}
+    flows = {l: float(v[0]) for l, v in getattr(res, "flows", {}).items()}
+    unmet = {n: float(v[0]) for n, v in res.unmet.items()}
+    soc_after = {}
+    for b in batteries:
+        prev = float(soc_now[b.id])
+        soc_after[b.id] = (prev + b.eta_charge * charge_remaining[b.id] * dt
+                           - discharge_fixed[b.id] * dt / b.eta_discharge)
+
+    # The fixed-injection solve itself is not visible to ``validate_schedule``;
+    # validate its executed arrays here, against the same realized period and the
+    # original physical model. This is what makes ``validate=False`` above safe.
+    res_validation = verify_executed_trajectory(
+        validation_problem, (dict(realized_demand[k]),), (dict(realized_avail[k]),),
+        dispatch={g: [v] for g, v in dispatch.items()},
+        flows={l: [v] for l, v in flows.items()},
+        unmet={n: [v] for n, v in unmet.items()},
+        charge={b.id: [charge_remaining[b.id]] for b in batteries},
+        discharge={b.id: [discharge_fixed[b.id]] for b in batteries},
+        soc={b.id: [soc_after[b.id]] for b in batteries},
+        battery_initial_soc={b.id: float(soc_now[b.id]) for b in batteries},
+        allow_unmet=True, battery_mode=battery_mode)
+    if not _validation_feasible(res_validation, battery_mode):
+        failed = [c.name for c in res_validation.failed()]
+        return _fallback("realized re-dispatch failed independent validation: "
+                         + ", ".join(failed))
+
+    caused = {b.id: charge_curtailed[b.id] for b in batteries}
+    return {"dispatch": dispatch,
+            "flows": flows,
+            "charge": dict(charge_remaining),
+            "discharge": dict(discharge_fixed),
+            "curtailed_mw": {b.id: 0.0 for b in batteries},
             "curtailed_total_mw": 0.0,
-            "soc": {b.id: float(soc_now[b.id]) for b in problem.batteries},
-            "unmet": {n: float(v[0]) for n, v in res.unmet.items()}}
+            "battery_curtailed_mw": {b.id: 0.0 for b in batteries},
+            "battery_curtailed_total_mw": 0.0,
+            "battery_charge_curtailed_mw": caused,
+            "battery_charge_curtailed_total_mw": float(sum(caused.values())),
+            "soc": {b.id: float(soc_now[b.id]) for b in batteries},
+            "unmet": unmet,
+            "validation": res_validation.to_dict()}
 
 
 # ---------------------------------------------------------------- controller ----
@@ -670,11 +889,22 @@ def run_rolling_horizon(problem: ScheduleProblem, config: ControlConfig | None =
     total_cost = 0.0
     total_unmet_energy = 0.0
     total_throughput = 0.0
+    total_battery_curtailed = 0.0
+    total_battery_charge_curtailed = 0.0
+    total_renewable_curtailed = 0.0
     period_costs: list[float] = []
     solve_times: list[float] = []
     failed = 0
     recovered = 0
+    execution_fallbacks = 0
+    executed_count = 0
     aborted_at: int | None = None
+    executed_dispatch: dict[str, list[float]] = {g.id: [] for g in problem.network.generators}
+    executed_charge: dict[str, list[float]] = {b.id: [] for b in problem.batteries}
+    executed_discharge: dict[str, list[float]] = {b.id: [] for b in problem.batteries}
+    executed_soc: dict[str, list[float]] = {b.id: [] for b in problem.batteries}
+    executed_unmet: dict[str, list[float]] = {n.id: [] for n in problem.network.nodes}
+    executed_flows: dict[str, list[float]] = {l.id: [] for l in problem.network.lines}
 
     for k in range(problem.periods):
         if forecast_fn is not None:
@@ -715,6 +945,7 @@ def run_rolling_horizon(problem: ScheduleProblem, config: ControlConfig | None =
             else:
                 plan = None
 
+        plan_is_executed = False
         if plan is None:
             # --- failure path: never fabricate a plan ------------------------
             failed += 1
@@ -727,11 +958,14 @@ def run_rolling_horizon(problem: ScheduleProblem, config: ControlConfig | None =
             # hold/recover: prefer a network- and ramp-aware single-period
             # re-dispatch with a frozen battery; fall back to the conservative
             # local merit-order recourse only if that solve also fails. Never
-            # fabricates a plan or an objective.
-            plan = _realized_redispatch(problem, k, realized_demand, realized_avail, soc_now,
-                                        charge={b.id: 0.0 for b in problem.batteries},
-                                        discharge={b.id: 0.0 for b in problem.batteries},
-                                        init_dispatch=init_dispatch)
+            # fabricates a plan or an objective. This record IS the execution, so
+            # it is not re-dispatched below (which would discard any curtailment).
+            plan = _realized_redispatch(
+                problem, k, realized_demand, realized_avail, soc_now,
+                charge={b.id: 0.0 for b in problem.batteries},
+                discharge={b.id: 0.0 for b in problem.batteries},
+                init_dispatch=init_dispatch, battery_mode=config.battery_mode)
+            plan_is_executed = True
             step.failure_recovered = True
             step.recovery_note = ("replan failed; executed frozen-battery least-cost "
                                   "network-aware single-period recourse (see message)")
@@ -746,22 +980,49 @@ def run_rolling_horizon(problem: ScheduleProblem, config: ControlConfig | None =
         # injection. This guarantees the EXECUTED trajectory is physically consistent
         # (generator limits vs realized availability, ramps vs the previous executed
         # dispatch, power balance with line flows) without ever fabricating supply.
-        committed_charge = {b: float(v) for b, v in plan["charge"].items()}
-        committed_discharge = {b: float(v) for b, v in plan["discharge"].items()}
-        executed_plan = _realized_redispatch(
-            problem, k, realized_demand, realized_avail, soc_now,
-            charge=committed_charge, discharge=committed_discharge,
-            init_dispatch=init_dispatch)
+        if plan_is_executed:
+            executed_plan = plan
+        else:
+            committed_charge = {b: float(v) for b, v in plan["charge"].items()}
+            committed_discharge = {b: float(v) for b, v in plan["discharge"].items()}
+            executed_plan = _realized_redispatch(
+                problem, k, realized_demand, realized_avail, soc_now,
+                charge=committed_charge, discharge=committed_discharge,
+                init_dispatch=init_dispatch, battery_mode=config.battery_mode)
         dispatch = {g: float(v) for g, v in executed_plan["dispatch"].items()}
         flows = {l: float(v) for l, v in (executed_plan.get("flows") or {}).items()}
-        charge = committed_charge
-        discharge = committed_discharge
+        charge = {b.id: float(executed_plan["charge"].get(b.id, 0.0))
+                  for b in problem.batteries}
+        discharge = {b.id: float(executed_plan["discharge"].get(b.id, 0.0))
+                     for b in problem.batteries}
         unmet = {n: float(v) for n, v in executed_plan["unmet"].items()}
         cost = _period_realized_cost(problem, k, dispatch, unmet, discharge, charge)
         new_soc = _advance_soc(problem, soc_now, k, charge, discharge)
+        battery_curtailed_mw = {b.id: float(executed_plan.get("battery_curtailed_mw", {}).get(b.id, 0.0))
+                                for b in problem.batteries}
+        battery_charge_curtailed_mw = {
+            b.id: float(executed_plan.get("battery_charge_curtailed_mw", {}).get(b.id, 0.0))
+            for b in problem.batteries}
+        renewable_curtailed_mw = {}
+        for g in problem.network.generators:
+            if not g.renewable:
+                continue
+            if not problem.horizon.generator_online[k].get(g.id, False):
+                continue
+            limit = max(0.0, min(g.capacity_mw, float(realized_avail[k].get(g.id, 0.0))))
+            renewable_curtailed_mw[g.id] = max(0.0, limit - dispatch.get(g.id, 0.0))
+        step.execution_fallback = bool(executed_plan.get("fallback"))
+        if step.execution_fallback:
+            execution_fallbacks += 1
+            note = str(executed_plan.get("fallback_reason", "network-aware re-dispatch fell back"))
+            step.recovery_note = (step.recovery_note + " | " + note).strip(" |")
 
         step.executed = {"dispatch": dispatch, "flows": flows, "charge": charge,
-                         "discharge": discharge, "unmet": unmet}
+                         "discharge": discharge, "unmet": unmet,
+                         "battery_curtailed_mw": battery_curtailed_mw,
+                         "battery_charge_curtailed_mw": battery_charge_curtailed_mw,
+                         "renewable_curtailed_mw": renewable_curtailed_mw,
+                         "fallback": step.execution_fallback}
         step.planned_executed = plan
         step.realized_cost_usd = cost
         step.battery_soc_mwh = dict(new_soc)
@@ -769,15 +1030,33 @@ def run_rolling_horizon(problem: ScheduleProblem, config: ControlConfig | None =
             step.runtime_seconds = 0.0
         steps.append(step)
 
+        dt = problem.step_hours
         total_cost += cost
         period_costs.append(cost)
-        total_unmet_energy += problem.step_hours * sum(unmet.values())
-        total_throughput += problem.step_hours * sum(discharge.values())
+        total_unmet_energy += dt * sum(unmet.values())
+        total_throughput += dt * sum(discharge.values())
+        total_battery_curtailed += dt * sum(battery_curtailed_mw.values())
+        total_battery_charge_curtailed += dt * sum(battery_charge_curtailed_mw.values())
+        total_renewable_curtailed += dt * sum(renewable_curtailed_mw.values())
         solve_times.append(step.runtime_seconds)
+        for g in problem.network.generators:
+            executed_dispatch[g.id].append(float(dispatch.get(g.id, 0.0)))
+        for b in problem.batteries:
+            executed_charge[b.id].append(float(charge.get(b.id, 0.0)))
+            executed_discharge[b.id].append(float(discharge.get(b.id, 0.0)))
+            executed_soc[b.id].append(float(new_soc[b.id]))
+        for n in problem.network.nodes:
+            executed_unmet[n.id].append(float(unmet.get(n.id, 0.0)))
+        # Missing flows mean the local fallback balanced each node internally (zero
+        # line flow), not "unknown". Record zeros so the full trajectory validator
+        # still checks line limits and power balance for every period.
+        for l in problem.network.lines:
+            executed_flows[l.id].append(float(flows.get(l.id, 0.0)))
 
         # advance carried state
         soc_now = new_soc
         init_dispatch = dispatch
+        executed_count += 1
 
     executed = len(steps)
     if aborted_at is not None:
@@ -790,7 +1069,28 @@ def run_rolling_horizon(problem: ScheduleProblem, config: ControlConfig | None =
         status = "completed"
         msg = "completed; every replan optimal"
 
-    cvar = _realized_cvar(period_costs, config.cvar_confidence)
+    risk = _realized_risk(period_costs, config.cvar_confidence)
+    realized_validation = None
+    physical_feasible = None
+    if executed_count:
+        realized_validation = verify_executed_trajectory(
+            _first_periods_problem(problem, executed_count),
+            realized_demand[:executed_count], realized_avail[:executed_count],
+            dispatch=executed_dispatch,
+            flows=executed_flows,
+            unmet=executed_unmet,
+            charge=executed_charge,
+            discharge=executed_discharge,
+            soc=executed_soc,
+            battery_initial_soc={b.id: float(b.initial_soc_mwh) for b in problem.batteries},
+            allow_unmet=config.allow_unmet,
+            battery_mode=config.battery_mode)
+        physical_feasible = _validation_feasible(realized_validation, config.battery_mode)
+        if not physical_feasible:
+            failed_names = ", ".join(c.name for c in realized_validation.failed())
+            msg = (msg + " | EXECUTED TRAJECTORY FAILED INDEPENDENT VALIDATION: "
+                   + failed_names).strip(" |")
+
     return ControlResult(
         status=status, mode=config.mode, failure_policy=config.failure_policy,
         lookahead=config.lookahead, battery_mode=config.battery_mode, solver=solver_name,
@@ -798,31 +1098,92 @@ def run_rolling_horizon(problem: ScheduleProblem, config: ControlConfig | None =
         realized_operating_cost_usd=float(total_cost),
         realized_unmet_energy_mwh=float(total_unmet_energy),
         realized_battery_throughput_mwh=float(total_throughput),
-        realized_cvar_usd=cvar,
+        realized_battery_curtailed_mwh=float(total_battery_curtailed),
+        realized_battery_charge_curtailed_mwh=float(total_battery_charge_curtailed),
+        realized_renewable_curtailed_mwh=float(total_renewable_curtailed),
+        realized_cvar_usd=None if risk is None else risk["cvar"],
+        realized_var_usd=None if risk is None else risk["var"],
+        realized_cvar_alpha=float(config.cvar_confidence) if risk is not None else None,
+        realized_cvar_basis="per_period_realized_operating_cost_uniform_weights",
+        realized_cost_observations_usd=list(period_costs),
+        realized_validation=(realized_validation.to_dict()
+                             if realized_validation is not None else None),
+        realized_physical_feasible=physical_feasible,
+        realized_conditions_sha256=_conditions_sha256(realized_demand[:executed_count],
+                                                      realized_avail[:executed_count]),
+        realized_demand_mw=[dict(row) for row in realized_demand[:executed_count]],
+        realized_availability_mw=[dict(row) for row in realized_avail[:executed_count]],
+        problem_sha256=_problem_sha256(problem),
+        initial_soc_mwh={b.id: float(b.initial_soc_mwh) for b in problem.batteries},
+        initial_dispatch_mw={g: float(v) for g, v in problem.initial_dispatch_mw.items()},
+        config=asdict(config),
         mean_solve_seconds=float(np.mean(solve_times)) if solve_times else 0.0,
         max_solve_seconds=float(np.max(solve_times)) if solve_times else 0.0,
-        failed_replans=failed, recovered_replans=recovered, message=msg)
+        failed_replans=failed, recovered_replans=recovered,
+        execution_fallbacks=execution_fallbacks, message=msg)
 
 
-def _realized_cvar(costs: Sequence[float], alpha: float) -> float | None:
-    """CVaR of per-period realized costs at confidence ``alpha`` (uniform weights)."""
+def _realized_risk(costs: Sequence[float], alpha: float) -> dict[str, float] | None:
+    """Risk metrics of per-period realized costs at confidence ``alpha``.
+
+    This is deliberately a *per-period, uniform-weight* empirical distribution, not
+    the scenario distribution used by the stochastic planner. The returned schema
+    records that basis explicitly so the two are never conflated.
+    """
     if not costs:
         return None
     from gridmind.risk_eval import _risk_metrics
     probs = [1.0 / len(costs)] * len(costs)
-    return float(_risk_metrics(list(costs), probs, alpha)["cvar"])
+    return _risk_metrics(list(costs), probs, alpha)
+
+
+def _realized_cvar(costs: Sequence[float], alpha: float) -> float | None:
+    """Backwards-compatible wrapper returning only the per-period realized CVaR."""
+    risk = _realized_risk(costs, alpha)
+    return None if risk is None else float(risk["cvar"])
 
 
 # ------------------------------------------------------------- baseline ----
 @dataclass
 class OpenLoopBaseline:
-    """Fixed open-loop schedule evaluated on identical realized conditions."""
+    """Fixed open-loop schedule evaluated on identical realized conditions.
+
+    ``planned_*`` fields describe the forecast-optimal schedule executed *as-is*
+    (the old, physically invalid comparison). ``realized_*`` fields describe the
+    fair counterfactual: the same fixed battery action is executed, but generation
+    is economically re-dispatched at realized conditions exactly as the controller
+    does, and the resulting trajectory is independently validated.
+    """
     status: str
     solver: str
+    planned_operating_cost_usd: float | None = None
+    planned_unmet_energy_mwh: float | None = None
+    planned_battery_throughput_mwh: float | None = None
+    planned_cvar_usd: float | None = None
+    planned_validation: dict[str, Any] | None = None
+    planned_physical_feasible: bool | None = None
     realized_operating_cost_usd: float | None = None
     realized_unmet_energy_mwh: float | None = None
     realized_battery_throughput_mwh: float | None = None
+    realized_battery_curtailed_mwh: float | None = None
+    realized_battery_charge_curtailed_mwh: float | None = None
+    realized_renewable_curtailed_mwh: float | None = None
     realized_cvar_usd: float | None = None
+    realized_var_usd: float | None = None
+    realized_cvar_alpha: float | None = None
+    realized_cvar_basis: str = "per_period_realized_operating_cost_uniform_weights"
+    realized_cost_observations_usd: list[float] = field(default_factory=list)
+    realized_validation: dict[str, Any] | None = None
+    realized_physical_feasible: bool | None = None
+    realized_conditions_sha256: str = ""
+    realized_demand_mw: list[dict[str, float]] = field(default_factory=list)
+    realized_availability_mw: list[dict[str, float]] = field(default_factory=list)
+    problem_sha256: str = ""
+    initial_soc_mwh: dict[str, float] = field(default_factory=dict)
+    initial_dispatch_mw: dict[str, float] = field(default_factory=dict)
+    execution_fallbacks: int = 0
+    redispatch_applied: bool = True
+    config: dict[str, Any] = field(default_factory=dict)
     terminal_soc_mwh: dict[str, float] = field(default_factory=dict)
     message: str = ""
 
@@ -848,6 +1209,7 @@ def run_open_loop_baseline(problem: ScheduleProblem, *, battery_mode: str = "lp"
     honoured because the schedule spans the whole horizon in one shot).
     """
     config = config or ControlConfig(battery_mode=battery_mode, allow_unmet=allow_unmet)
+    config = replace(config, battery_mode=battery_mode, allow_unmet=allow_unmet)
     model = ForecastErrorModel(demand_sigma=config.demand_sigma,
                                renewable_sigma=config.renewable_sigma, seed=config.seed)
     if realized_demand is None or realized_avail is None:
@@ -862,28 +1224,134 @@ def run_open_loop_baseline(problem: ScheduleProblem, *, battery_mode: str = "lp"
     fc_prob.validate()
     res = solve_schedule(fc_prob, allow_unmet=allow_unmet, battery_mode=battery_mode)
     if res.status != "optimal":
-        return OpenLoopBaseline(status=res.status, solver=res.solver, message=res.message)
+        return OpenLoopBaseline(status=res.status, solver=res.solver, message=res.message,
+                                config=asdict(config))
 
     dt = problem.step_hours
-    costs: list[float] = []
-    unmet_energy = 0.0
-    throughput = 0.0
+    planned_costs: list[float] = []
+    planned_unmet_energy = 0.0
+    planned_throughput = 0.0
     for t in range(problem.periods):
         dispatch = {g: res.dispatch[g][t] for g in res.dispatch}
         unmet = {n: res.unmet[n][t] for n in res.unmet}
         discharge = {b: res.discharge[b][t] for b in res.discharge}
         charge = {b: res.charge[b][t] for b in res.charge}
+        planned_costs.append(_period_realized_cost(problem, t, dispatch, unmet, discharge, charge))
+        planned_unmet_energy += dt * sum(unmet.values())
+        planned_throughput += dt * sum(discharge.values())
+    planned_risk = _realized_risk(planned_costs, cvar_confidence)
+    planned_validation = verify_executed_trajectory(
+        problem, realized_demand, realized_avail,
+        dispatch=res.dispatch, flows=getattr(res, "flows", {}),
+        unmet=res.unmet, charge=res.charge, discharge=res.discharge, soc=res.soc,
+        battery_initial_soc={b.id: float(b.initial_soc_mwh) for b in problem.batteries},
+        allow_unmet=allow_unmet, battery_mode=battery_mode)
+
+    # Fair counterfactual: keep the forecast-optimal battery action fixed, but
+    # re-dispatch generation at realized conditions exactly like the controller.
+    # The open-loop schedule is no longer credited with infeasible as-planned costs.
+    soc_now = {b.id: float(b.initial_soc_mwh) for b in problem.batteries}
+    init_dispatch = {g: float(v) for g, v in problem.initial_dispatch_mw.items()}
+    executed_dispatch: dict[str, list[float]] = {g.id: [] for g in problem.network.generators}
+    executed_charge: dict[str, list[float]] = {b.id: [] for b in problem.batteries}
+    executed_discharge: dict[str, list[float]] = {b.id: [] for b in problem.batteries}
+    executed_soc: dict[str, list[float]] = {b.id: [] for b in problem.batteries}
+    executed_unmet: dict[str, list[float]] = {n.id: [] for n in problem.network.nodes}
+    executed_flows: dict[str, list[float]] = {l.id: [] for l in problem.network.lines}
+    costs: list[float] = []
+    unmet_energy = 0.0
+    throughput = 0.0
+    battery_curtailed = 0.0
+    battery_charge_curtailed = 0.0
+    renewable_curtailed = 0.0
+    execution_fallbacks = 0
+    for t in range(problem.periods):
+        committed_charge = {b.id: float(res.charge[b.id][t]) for b in problem.batteries}
+        committed_discharge = {b.id: float(res.discharge[b.id][t]) for b in problem.batteries}
+        executed_plan = _realized_redispatch(
+            problem, t, realized_demand, realized_avail, soc_now,
+            charge=committed_charge, discharge=committed_discharge,
+            init_dispatch=init_dispatch, battery_mode=battery_mode)
+        if executed_plan.get("fallback"):
+            execution_fallbacks += 1
+        dispatch = {g: float(v) for g, v in executed_plan["dispatch"].items()}
+        flows = {l: float(v) for l, v in (executed_plan.get("flows") or {}).items()}
+        charge = {b.id: float(executed_plan["charge"].get(b.id, 0.0))
+                  for b in problem.batteries}
+        discharge = {b.id: float(executed_plan["discharge"].get(b.id, 0.0))
+                     for b in problem.batteries}
+        unmet = {n: float(v) for n, v in executed_plan["unmet"].items()}
         costs.append(_period_realized_cost(problem, t, dispatch, unmet, discharge, charge))
         unmet_energy += dt * sum(unmet.values())
         throughput += dt * sum(discharge.values())
+        battery_curtailed += dt * sum(
+            float(v) for v in executed_plan.get("battery_curtailed_mw", {}).values())
+        battery_charge_curtailed += dt * sum(
+            float(v) for v in executed_plan.get("battery_charge_curtailed_mw", {}).values())
+        for g in problem.network.generators:
+            executed_dispatch[g.id].append(float(dispatch.get(g.id, 0.0)))
+            if g.renewable and problem.horizon.generator_online[t].get(g.id, False):
+                limit = max(0.0, min(g.capacity_mw, float(realized_avail[t].get(g.id, 0.0))))
+                renewable_curtailed += dt * max(0.0, limit - dispatch.get(g.id, 0.0))
+        for b in problem.batteries:
+            executed_charge[b.id].append(float(charge.get(b.id, 0.0)))
+            executed_discharge[b.id].append(float(discharge.get(b.id, 0.0)))
+        new_soc = _advance_soc(problem, soc_now, t, charge, discharge)
+        for b in problem.batteries:
+            executed_soc[b.id].append(float(new_soc[b.id]))
+        for n in problem.network.nodes:
+            executed_unmet[n.id].append(float(unmet.get(n.id, 0.0)))
+        for l in problem.network.lines:
+            executed_flows[l.id].append(float(flows.get(l.id, 0.0)))
+        soc_now = new_soc
+        init_dispatch = dispatch
+
+    realized_risk = _realized_risk(costs, cvar_confidence)
+    realized_validation = verify_executed_trajectory(
+        problem, realized_demand, realized_avail,
+        dispatch=executed_dispatch,
+        flows=executed_flows,
+        unmet=executed_unmet, charge=executed_charge, discharge=executed_discharge,
+        soc=executed_soc,
+        battery_initial_soc={b.id: float(b.initial_soc_mwh) for b in problem.batteries},
+        allow_unmet=allow_unmet, battery_mode=battery_mode)
+    realized_feasible = _validation_feasible(realized_validation, battery_mode)
+    msg = ("fixed open-loop battery schedule from the time-0 forecast; generation "
+           "re-dispatched at realized conditions (same policy as the controller)")
+    if not realized_feasible:
+        msg += (" | EXECUTED BASELINE FAILED INDEPENDENT VALIDATION: "
+                + ", ".join(c.name for c in realized_validation.failed()))
     return OpenLoopBaseline(
         status="optimal", solver=res.solver,
+        planned_operating_cost_usd=float(sum(planned_costs)),
+        planned_unmet_energy_mwh=float(planned_unmet_energy),
+        planned_battery_throughput_mwh=float(planned_throughput),
+        planned_cvar_usd=None if planned_risk is None else planned_risk["cvar"],
+        planned_validation=planned_validation.to_dict(),
+        planned_physical_feasible=_validation_feasible(planned_validation, battery_mode),
         realized_operating_cost_usd=float(sum(costs)),
         realized_unmet_energy_mwh=float(unmet_energy),
         realized_battery_throughput_mwh=float(throughput),
-        realized_cvar_usd=_realized_cvar(costs, cvar_confidence),
-        terminal_soc_mwh={b: float(res.soc[b][-1]) for b in res.soc},
-        message="fixed open-loop schedule from the time-0 forecast, executed as-is")
+        realized_battery_curtailed_mwh=float(battery_curtailed),
+        realized_battery_charge_curtailed_mwh=float(battery_charge_curtailed),
+        realized_renewable_curtailed_mwh=float(renewable_curtailed),
+        realized_cvar_usd=None if realized_risk is None else realized_risk["cvar"],
+        realized_var_usd=None if realized_risk is None else realized_risk["var"],
+        realized_cvar_alpha=float(cvar_confidence) if realized_risk is not None else None,
+        realized_cost_observations_usd=list(costs),
+        realized_validation=realized_validation.to_dict(),
+        realized_physical_feasible=realized_feasible,
+        realized_conditions_sha256=_conditions_sha256(realized_demand, realized_avail),
+        realized_demand_mw=[dict(row) for row in realized_demand],
+        realized_availability_mw=[dict(row) for row in realized_avail],
+        problem_sha256=_problem_sha256(problem),
+        initial_soc_mwh={b.id: float(b.initial_soc_mwh) for b in problem.batteries},
+        initial_dispatch_mw={g: float(v) for g, v in problem.initial_dispatch_mw.items()},
+        execution_fallbacks=execution_fallbacks,
+        redispatch_applied=True,
+        config=asdict(config),
+        terminal_soc_mwh={b.id: float(soc_now[b.id]) for b in problem.batteries},
+        message=msg)
 
 
 @dataclass
@@ -906,6 +1374,13 @@ class ControlComparison:
             "note": ("differences are controller minus baseline on IDENTICAL realized "
                      "conditions; negative cost difference means the controller was cheaper. "
                      "Synthetic scenario - no superiority claim."),
+            "provenance": {
+                "realized_conditions_sha256": self.controller.realized_conditions_sha256
+                or self.baseline.realized_conditions_sha256,
+                "problem_sha256": self.controller.problem_sha256 or self.baseline.problem_sha256,
+                "realized_inputs_embedded": bool(self.controller.realized_demand_mw)
+                and bool(self.baseline.realized_demand_mw),
+            },
         }
 
 

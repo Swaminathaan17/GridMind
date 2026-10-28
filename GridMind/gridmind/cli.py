@@ -388,11 +388,20 @@ def cmd_control(args: argparse.Namespace) -> int:
     print(f"  realized CVaR({config.cvar_confidence}) {_fmt(ctrl.realized_cvar_usd)} USD | "
           f"solve time mean {_fmt(ctrl.mean_solve_seconds, 4)}s "
           f"max {_fmt(ctrl.max_solve_seconds, 4)}s")
+    print(f"  executed feasibility={ctrl.realized_physical_feasible} | "
+          f"execution fallbacks={ctrl.execution_fallbacks} | "
+          f"curtailed battery {_fmt(ctrl.realized_battery_curtailed_mwh, 3)} MWh, "
+          f"charge {_fmt(ctrl.realized_battery_charge_curtailed_mwh, 3)} MWh, "
+          f"renewable {_fmt(ctrl.realized_renewable_curtailed_mwh, 3)} MWh")
     print("fixed open-loop baseline (identical realized conditions):")
     print(f"  status={base.status} solver={base.solver or 'n/a'} | "
-          f"cost {_fmt(base.realized_operating_cost_usd)} USD | "
+          f"executed cost {_fmt(base.realized_operating_cost_usd)} USD | "
           f"unmet {_fmt(base.realized_unmet_energy_mwh, 3)} MWh | "
           f"CVaR {_fmt(base.realized_cvar_usd)} USD")
+    print(f"  as-planned cost {_fmt(base.planned_operating_cost_usd)} USD | "
+          f"as-planned physically feasible={base.planned_physical_feasible} | "
+          f"executed physically feasible={base.realized_physical_feasible} | "
+          f"execution fallbacks={base.execution_fallbacks}")
     print("difference (controller - baseline): "
           f"cost {_fmt(comparison.cost_difference_usd)} USD, "
           f"unmet {_fmt(comparison.unmet_difference_mwh, 3)} MWh, "
