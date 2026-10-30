@@ -1,8 +1,10 @@
 """Stage 5C benchmark harness (reproducible, paired, no fabrication).
 
-Runs the four methods on identical realized stress conditions with causal
-forecast/realization separation, independent trajectory verification, and
-machine-readable artifacts written to results/stage5c_resilience/.
+Runs the configured methods on identical realized stress conditions with causal
+forecast/realization separation. Schema v2 stores each method's actually executed
+trace, validates that trace without re-solving, and separates solver status from
+policy status so solver-optimal but policy-infeasible methods are excluded from
+comparisons explicitly.
 """
 
 from __future__ import annotations
@@ -17,13 +19,14 @@ from gridmind.control import ControlConfig
 from gridmind.multiperiod import ScheduleProblem
 from gridmind.stress import (METHOD_NAMES, STRESS_SCHEMA_VERSION, Disturbance,
                              ForecastErrorModel, MethodResult, StressEnvironment,
-                             StressSchedule, _advance, run_method_open_loop,
-                             run_method_rolling_horizon, run_method_stochastic,
-                             verify_trajectory)
+                             StressSchedule, run_method_open_loop,
+                             run_method_rolling_horizon,
+                             run_method_stochastic,
+                             run_method_stochastic_rolling_horizon)
 from gridmind.validation import DEFAULT_TOL
 
 
-STRESS_BENCH_SCHEMA_VERSION = 1
+STRESS_BENCH_SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -55,6 +58,9 @@ class StressBenchmarkRecord:
     results: dict[str, Any] = field(default_factory=dict)
     failures: list[dict[str, Any]] = field(default_factory=list)
     exclusions: list[dict[str, Any]] = field(default_factory=list)
+    included_methods: list[str] = field(default_factory=list)
+    excluded_methods: list[str] = field(default_factory=list)
+    comparison: dict[str, Any] = field(default_factory=dict)
     runtime_seconds: float = 0.0
     started_at: float = 0.0
 
@@ -68,6 +74,9 @@ class StressBenchmarkRecord:
             "results": self.results,
             "failures": self.failures,
             "exclusions": self.exclusions,
+            "included_methods": self.included_methods,
+            "excluded_methods": self.excluded_methods,
+            "comparison": self.comparison,
             "runtime_seconds": self.runtime_seconds,
         }
 
@@ -78,24 +87,161 @@ def _base_problem() -> ScheduleProblem:
 
 
 def _reconstruct_stress_trajectories(problem: ScheduleProblem, method_result: MethodResult,
-                                       realized_d: tuple, realized_a: tuple,
-                                       battery_mode: str = "lp", allow_unmet: bool = True,
-                                       tol: float = DEFAULT_TOL):
-    """Reconstruct executed trajectories for open-loop/stochastic stress methods if possible."""
-    # The stress methods don't store full trajectories; for validation we need to
-    # reconstruct using the same logic. But easier: just return None if can't reconstruct.
-    # We'll rely on method implementations to be correct; independent validation
-    # for open-loop/stochastic would require storing traces - but we must add minimal support.
-    return None
+                                     realized_d: tuple, realized_a: tuple,
+                                     battery_mode: str = "lp", allow_unmet: bool = True,
+                                     tol: float = DEFAULT_TOL):
+    """Compatibility shim: return the stored executed trace, never a re-solve."""
+    del problem, realized_d, realized_a, battery_mode, allow_unmet, tol
+    return list(method_result.trace)
+
+
+def _error_result(method: str, exc: BaseException) -> dict[str, Any]:
+    return {
+        "method": method,
+        "status": "error",
+        "solver_status": "error",
+        "policy_status": "error",
+        "validation_status": "skipped",
+        "feasible_for_comparison": False,
+        "included_for_comparison": False,
+        "exclusion_reason": f"execution_error: {exc}",
+        "policy_label": "",
+        "trace": [],
+        "executed_trace": [],
+        "periods_expected": 0,
+        "periods_executed": 0,
+        "message": str(exc),
+        "attempted": True,
+        "execution_complete": False,
+    }
+
+
+def _run_selected(env: StressEnvironment, config: StressBenchmarkConfig,
+                  selected: tuple[str, ...]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    results: dict[str, Any] = {}
+    failures: list[dict[str, Any]] = []
+    for method in selected:
+        try:
+            if method == "deterministic_open_loop":
+                out = run_method_open_loop(
+                    env, battery_mode=config.battery_mode,
+                    allow_unmet=config.allow_unmet, tol=config.tol,
+                    perfect_foresight=False)
+            elif method == "stochastic_risk_neutral":
+                out = run_method_stochastic(
+                    env, risk_weight=config.risk_weight_neutral,
+                    cvar_alpha=config.cvar_alpha, lead_periods=config.lead_periods,
+                    n_scenarios=config.n_scenarios_stochastic,
+                    battery_mode=config.battery_mode,
+                    allow_unmet=config.allow_unmet, tol=config.tol)
+            elif method == "stochastic_risk_aware":
+                out = run_method_stochastic(
+                    env, risk_weight=config.risk_weight_aware,
+                    cvar_alpha=config.cvar_alpha, lead_periods=config.lead_periods,
+                    n_scenarios=config.n_scenarios_stochastic,
+                    battery_mode=config.battery_mode,
+                    allow_unmet=config.allow_unmet, tol=config.tol)
+            elif method in ("stochastic_rolling_risk_neutral",
+                            "stochastic_rolling_risk_aware"):
+                risk_weight = (config.risk_weight_neutral
+                               if method.endswith("risk_neutral")
+                               else config.risk_weight_aware)
+                out = run_method_stochastic_rolling_horizon(
+                    env, risk_weight=risk_weight, cvar_alpha=config.cvar_alpha,
+                    lead_periods=config.lead_periods,
+                    n_scenarios=config.n_scenarios_stochastic,
+                    lookahead=config.lookahead,
+                    battery_mode=config.battery_mode,
+                    allow_unmet=config.allow_unmet,
+                    demand_sigma=config.demand_sigma,
+                    renewable_sigma=config.renewable_sigma,
+                    seed=config.seed, tol=config.tol)
+            elif method == "rolling_horizon":
+                ctrl_cfg = ControlConfig(
+                    lookahead=config.lookahead, mode="deterministic",
+                    battery_mode=config.battery_mode,
+                    allow_unmet=config.allow_unmet,
+                    demand_sigma=config.demand_sigma,
+                    renewable_sigma=config.renewable_sigma,
+                    seed=config.seed, cvar_confidence=config.cvar_alpha)
+                out = run_method_rolling_horizon(env, ctrl_cfg, tol=config.tol)
+            else:  # pragma: no cover - guarded by caller
+                raise ValueError(f"unknown method {method!r}")
+            results[method] = out.to_dict()
+            if out.solver_status not in ("optimal", ""):
+                failures.append({"method": method, "error": out.message or out.solver_status,
+                                 "solver_status": out.solver_status,
+                                 "policy_status": out.policy_status})
+        except Exception as exc:  # noqa: BLE001
+            failures.append({"method": method, "error": str(exc),
+                             "solver_status": "error", "policy_status": "error"})
+            results[method] = _error_result(method, exc)
+    return results, failures
+
+
+def _classify(results: dict[str, Any], selected: tuple[str, ...]
+              ) -> tuple[list[str], list[dict[str, Any]], dict[str, Any]]:
+    included: list[str] = []
+    exclusions: list[dict[str, Any]] = []
+    for method in selected:
+        payload = results.get(method)
+        if not isinstance(payload, dict):
+            payload = _error_result(method, ValueError("method returned no result"))
+            results[method] = payload
+        payload["attempted"] = True
+        payload["execution_complete"] = bool(
+            payload.get("trace") and payload.get("periods_executed")
+            == payload.get("periods_expected"))
+        included_ok = bool(payload.get("feasible_for_comparison")) \
+            and payload.get("validation_status") == "passed" \
+            and payload.get("solver_status") == "optimal"
+        payload["included_for_comparison"] = included_ok
+        if included_ok:
+            included.append(method)
+            continue
+        reason = payload.get("exclusion_reason")
+        if not reason:
+            solver_status = str(payload.get("solver_status", "unknown"))
+            reason = (f"validation_{payload.get('validation_status', 'unknown')}"
+                      if solver_status == "optimal"
+                      else (solver_status if solver_status.startswith("solver_")
+                            else f"solver_{solver_status}"))
+        exclusions.append({
+            "method": method,
+            "reason": reason,
+            "solver_status": payload.get("solver_status"),
+            "policy_status": payload.get("policy_status"),
+            "validation_status": payload.get("validation_status"),
+            "terminal_soc_deviation_mwh": payload.get("terminal_soc_deviation_mwh"),
+            "metric_discrepancies": payload.get("metric_discrepancies") or [],
+        })
+    comparison = {
+        "attempted_methods": list(selected),
+        "solver_optimal_methods": [m for m in selected
+                                   if results.get(m, {}).get("solver_status") == "optimal"],
+        "successfully_executed_methods": [m for m in selected
+                                          if results.get(m, {}).get("execution_complete")],
+        "validation_passed_methods": [m for m in selected
+                                      if results.get(m, {}).get("validation_status") == "passed"],
+        "included_methods": included,
+        "excluded_methods": [e["method"] for e in exclusions],
+    }
+    return included, exclusions, comparison
 
 
 def run_stress_benchmark(problem: ScheduleProblem | None = None,
                          schedule: StressSchedule | None = None,
                          config: StressBenchmarkConfig | None = None
                          ) -> StressBenchmarkRecord:
-    """Run all methods on identical realized stress conditions."""
+    """Run the configured methods on identical realized stress conditions."""
     t0 = time.perf_counter()
     config = config or StressBenchmarkConfig()
+    unknown = [m for m in config.methods if m not in METHOD_NAMES]
+    if unknown:
+        raise ValueError(f"unknown benchmark methods: {unknown}; supported: {METHOD_NAMES}")
+    selected = tuple(m for m in METHOD_NAMES if m in config.methods)
+    if not selected:
+        raise ValueError("at least one benchmark method must be selected")
     problem = problem or _base_problem()
     problem.validate()
     if schedule is None:
@@ -116,218 +262,16 @@ def run_stress_benchmark(problem: ScheduleProblem | None = None,
     record.environment = env.to_dict()
     record.problem = {"periods": problem.periods, "step_hours": problem.step_hours,
                       "network": problem.network.name}
+    record.schema_version = STRESS_BENCH_SCHEMA_VERSION
 
-    results: dict[str, Any] = {}
-    failures: list[dict[str, Any]] = []
-    exclusions: list[dict[str, Any]] = []
-
-    realized_d, realized_a = env.realized()
-
-    try:
-        res_ol = run_method_open_loop(
-            env, battery_mode=config.battery_mode,
-            allow_unmet=config.allow_unmet, tol=config.tol,
-            perfect_foresight=False)
-        results["deterministic_open_loop"] = res_ol.to_dict()
-    except Exception as exc:  # noqa: BLE001
-        failures.append({"method": "deterministic_open_loop", "error": str(exc)})
-        results["deterministic_open_loop"] = {"status": "error", "message": str(exc)}
-
-    try:
-        res_sn = run_method_stochastic(
-            env, risk_weight=config.risk_weight_neutral, cvar_alpha=config.cvar_alpha,
-            lead_periods=config.lead_periods, n_scenarios=config.n_scenarios_stochastic,
-            battery_mode=config.battery_mode, allow_unmet=config.allow_unmet,
-            tol=config.tol)
-        results["stochastic_risk_neutral"] = res_sn.to_dict()
-    except Exception as exc:  # noqa: BLE001
-        failures.append({"method": "stochastic_risk_neutral", "error": str(exc)})
-        results["stochastic_risk_neutral"] = {"status": "error", "message": str(exc)}
-
-    try:
-        res_sa = run_method_stochastic(
-            env, risk_weight=config.risk_weight_aware, cvar_alpha=config.cvar_alpha,
-            lead_periods=config.lead_periods, n_scenarios=config.n_scenarios_stochastic,
-            battery_mode=config.battery_mode, allow_unmet=config.allow_unmet,
-            tol=config.tol)
-        results["stochastic_risk_aware"] = res_sa.to_dict()
-    except Exception as exc:  # noqa: BLE001
-        failures.append({"method": "stochastic_risk_aware", "error": str(exc)})
-        results["stochastic_risk_aware"] = {"status": "error", "message": str(exc)}
-
-    ctrl_cfg = ControlConfig(lookahead=config.lookahead, mode="deterministic",
-                             battery_mode=config.battery_mode,
-                             allow_unmet=config.allow_unmet,
-                             demand_sigma=config.demand_sigma,
-                             renewable_sigma=config.renewable_sigma,
-                             seed=config.seed, cvar_confidence=config.cvar_alpha)
-    try:
-        results["rolling_horizon"] = run_method_rolling_horizon(
-            env, ctrl_cfg, tol=config.tol).to_dict()
-    except Exception as exc:  # noqa: BLE001
-        failures.append({"method": "rolling_horizon", "error": str(exc)})
-        results["rolling_horizon"] = {"status": "error", "message": str(exc)}
-
-    # Independent verification for all completed methods
-    truth = env.truth_problem
-
-    def _validate_method_result(method_key: str, method_name: str, res_dict: dict):
-        if not isinstance(res_dict, dict):
-            return
-        status = res_dict.get("status")
-        if status in ("solver_unavailable", "error"):
-            res_dict["validation_status"] = "skipped_solver_or_error"
-            return
-        if status != "optimal" and method_name == "rolling_horizon" and status not in ("completed", "completed_with_recovery"):
-            res_dict["validation_status"] = "incomplete_or_failed"
-            return
-        # For rolling horizon we already have step structure; for others we need to reconstruct
-        try:
-            if method_name == "rolling_horizon":
-                from gridmind.control import run_rolling_horizon
-                res_ctrl = run_rolling_horizon(truth, ctrl_cfg,
-                                               realized_demand=realized_d,
-                                               realized_avail=realized_a,
-                                               forecast_fn=env.forecast_at)
-                v = verify_trajectory(truth, res_ctrl, realized_d, realized_a,
-                                      allow_unmet=config.allow_unmet, tol=config.tol,
-                                      battery_mode=config.battery_mode)
-                res_dict["independent_verification"] = v
-                res_dict["validation_status"] = "passed" if v.get("passed") and v.get("coverage_complete") else "failed"
-                res_dict["periods_expected"] = v.get("periods_expected")
-                res_dict["periods_executed"] = v.get("periods_executed")
-                if not (v.get("passed") and v.get("coverage_complete")):
-                    res_dict["_validation_rejected"] = True
-                return
-            # For open-loop and stochastic, reconstruct executed trajectories by re-running their execution
-            if method_name == "deterministic_open_loop":
-                from gridmind.scheduling import solve_schedule
-                from gridmind.control import _realized_redispatch, _advance_soc, ControlStep, ControlResult
-                batt_ids = [b.id for b in truth.batteries]
-                # get plan
-                fc_d, fc_a = env.forecast_at(0)
-                plan_problem = __import__('dataclasses').replace(truth, horizon=__import__('dataclasses').replace(
-                    truth.horizon, demand_mw=fc_d, availability_mw=fc_a))
-                plan_problem.validate()
-                res_plan = solve_schedule(plan_problem, allow_unmet=config.allow_unmet, battery_mode=config.battery_mode)
-                if res_plan.status != "optimal":
-                    res_dict["validation_status"] = "failed"
-                    res_dict["_validation_rejected"] = True
-                    return
-                # simulate
-                steps = []
-                soc_now = {b.id: float(b.initial_soc_mwh) for b in truth.batteries}
-                init_dispatch = dict(truth.initial_dispatch_mw or {})
-                for t in range(truth.periods):
-                    c = {b: float(res_plan.charge[b][t]) for b in res_plan.charge}
-                    d = {b: float(res_plan.discharge[b][t]) for b in res_plan.discharge}
-                    executed_plan = _realized_redispatch(truth, t, realized_d, realized_a, soc_now,
-                                                         charge=c, discharge=d, init_dispatch=init_dispatch,
-                                                         battery_mode=config.battery_mode)
-                    dispatch = executed_plan["dispatch"]
-                    flows = executed_plan.get("flows") or {}
-                    charge_e = {b: float((executed_plan.get("charge") or {}).get(b, 0.0)) for b in batt_ids}
-                    discharge_e = {b: float((executed_plan.get("discharge") or {}).get(b, 0.0)) for b in batt_ids}
-                    unmet = executed_plan["unmet"]
-                    soc_next = _advance(truth, soc_now, charge_e, discharge_e, t)
-                    step = ControlStep(period=t, window=(t, min(truth.periods, t+1)), status="optimal",
-                                       executed={"dispatch": dict(dispatch), "flows": dict(flows), "charge": charge_e,
-                                                 "discharge": discharge_e, "unmet": dict(unmet)},
-                                       battery_soc_mwh={b: float(soc_next[b]) for b in batt_ids})
-                    steps.append(step)
-                    soc_now = soc_next
-                    init_dispatch = dispatch
-                res_ctrl_like = ControlResult(status="completed", mode="det", failure_policy="hold",
-                                              lookahead=truth.periods, battery_mode=config.battery_mode,
-                                              solver=res_plan.solver, periods_executed=len(steps), steps=steps)
-                v = verify_trajectory(truth, res_ctrl_like, realized_d, realized_a,
-                                      allow_unmet=config.allow_unmet, tol=config.tol,
-                                      battery_mode=config.battery_mode)
-                res_dict["independent_verification"] = v
-                res_dict["validation_status"] = "passed" if v.get("passed") and v.get("coverage_complete") else "failed"
-                res_dict["periods_expected"] = v.get("periods_expected")
-                res_dict["periods_executed"] = v.get("periods_executed")
-                if not (v.get("passed") and v.get("coverage_complete")):
-                    res_dict["_validation_rejected"] = True
-                return
-            if method_name in ("stochastic_risk_neutral", "stochastic_risk_aware"):
-                from gridmind.control import ControlStep, ControlResult, _realized_redispatch, _advance_soc
-                from gridmind.stochastic import solve_stochastic, RiskConfig
-                from gridmind.uncertainty import generate_scenarios, UncertaintyConfig
-                # reconstruct
-                fc_d, fc_a = env.forecast_at(0)
-                forecast_problem = __import__('dataclasses').replace(truth, horizon=__import__('dataclasses').replace(
-                    truth.horizon, demand_mw=fc_d, availability_mw=fc_a))
-                forecast_problem.validate()
-                rw = config.risk_weight_neutral if method_name == "stochastic_risk_neutral" else config.risk_weight_aware
-                risk = RiskConfig(risk_weight=rw, cvar_alpha=config.cvar_alpha, lead_periods=config.lead_periods)
-                ucfg = UncertaintyConfig(n_scenarios=config.n_scenarios_stochastic, seed=env.stress.seed + 1,
-                                         demand_sigma=env.error_model.demand_sigma,
-                                         renewable_sigma=env.error_model.renewable_sigma)
-                scenario_set = generate_scenarios(forecast_problem, ucfg)
-                res_st = solve_stochastic(forecast_problem, scenario_set, risk=risk,
-                                          allow_unmet=config.allow_unmet, battery_mode=config.battery_mode)
-                if res_st.status != "optimal" or not res_st.first_stage:
-                    res_dict["validation_status"] = "failed"
-                    res_dict["_validation_rejected"] = True
-                    return
-                fs = res_st.first_stage
-                charge = {b: [float(v) for v in fs["charge"][b]] for b in fs["charge"]}
-                discharge = {b: [float(v) for v in fs["discharge"][b]] for b in fs["discharge"]}
-                batt_ids = [b.id for b in truth.batteries]
-                steps = []
-                soc_now = {b: float(truth.battery(b).initial_soc_mwh) for b in batt_ids}
-                init_dispatch = dict(truth.initial_dispatch_mw or {})
-                for t in range(truth.periods):
-                    if t < config.lead_periods:
-                        c = {b: float(charge[b][t]) if t < len(charge[b]) else 0.0 for b in batt_ids}
-                        d = {b: float(discharge[b][t]) if t < len(discharge[b]) else 0.0 for b in batt_ids}
-                    else:
-                        c = {b: 0.0 for b in batt_ids}
-                        d = {b: 0.0 for b in batt_ids}
-                    executed_plan = _realized_redispatch(truth, t, realized_d, realized_a, soc_now,
-                                                         charge=c, discharge=d, init_dispatch=init_dispatch,
-                                                         battery_mode=config.battery_mode)
-                    dispatch = executed_plan["dispatch"]
-                    flows = executed_plan.get("flows") or {}
-                    charge_e = {b: float((executed_plan.get("charge") or {}).get(b, 0.0)) for b in batt_ids}
-                    discharge_e = {b: float((executed_plan.get("discharge") or {}).get(b, 0.0)) for b in batt_ids}
-                    unmet = executed_plan["unmet"]
-                    soc_next = _advance_soc(truth, soc_now, t, charge_e, discharge_e)
-                    step = ControlStep(period=t, window=(t, min(truth.periods, t+1)), status="optimal",
-                                       executed={"dispatch": dict(dispatch), "flows": dict(flows), "charge": charge_e,
-                                                 "discharge": discharge_e, "unmet": dict(unmet)},
-                                       battery_soc_mwh={b: float(soc_next[b]) for b in batt_ids})
-                    steps.append(step)
-                    soc_now = soc_next
-                    init_dispatch = dispatch
-                res_ctrl_like = ControlResult(status="completed", mode="det", failure_policy="hold",
-                                              lookahead=truth.periods, battery_mode=config.battery_mode,
-                                              solver=res_st.solver, periods_executed=len(steps), steps=steps)
-                v = verify_trajectory(truth, res_ctrl_like, realized_d, realized_a,
-                                      allow_unmet=config.allow_unmet, tol=config.tol,
-                                      battery_mode=config.battery_mode)
-                res_dict["independent_verification"] = v
-                res_dict["validation_status"] = "passed" if v.get("passed") and v.get("coverage_complete") else "failed"
-                res_dict["periods_expected"] = v.get("periods_expected")
-                res_dict["periods_executed"] = v.get("periods_executed")
-                if not (v.get("passed") and v.get("coverage_complete")):
-                    res_dict["_validation_rejected"] = True
-                return
-        except Exception as exc:  # noqa: BLE001
-            res_dict["independent_verification"] = {"passed": False, "error": str(exc)}
-            res_dict["validation_status"] = "failed"
-            res_dict["_validation_rejected"] = True
-            return
-
-    _validate_method_result("deterministic_open_loop", "deterministic_open_loop", results.get("deterministic_open_loop", {}))
-    _validate_method_result("stochastic_risk_neutral", "stochastic_risk_neutral", results.get("stochastic_risk_neutral", {}))
-    _validate_method_result("stochastic_risk_aware", "stochastic_risk_aware", results.get("stochastic_risk_aware", {}))
-    _validate_method_result("rolling_horizon", "rolling_horizon", results.get("rolling_horizon", {}))
-
+    results, failures = _run_selected(env, config, selected)
+    included, exclusions, comparison = _classify(results, selected)
     record.results = results
     record.failures = failures
     record.exclusions = exclusions
+    record.included_methods = included
+    record.excluded_methods = [e["method"] for e in exclusions]
+    record.comparison = comparison
     record.runtime_seconds = time.perf_counter() - t0
     return record
 
@@ -345,10 +289,31 @@ def write_stress_benchmark(record: StressBenchmarkRecord,
         "runtime_seconds": payload["runtime_seconds"],
         "failures": payload["failures"],
         "exclusions": payload["exclusions"],
-        "results": {k: {"method": v.get("method"), "status": v.get("status"),
+        "included_methods": payload["included_methods"],
+        "excluded_methods": payload["excluded_methods"],
+        "comparison": payload["comparison"],
+        "results": {k: {"method": v.get("method"),
+                        "status": v.get("status"),
+                        "solver_status": v.get("solver_status"),
+                        "policy_status": v.get("policy_status"),
+                        "validation_status": v.get("validation_status"),
+                        "feasible_for_comparison": v.get("feasible_for_comparison"),
+                        "included_for_comparison": v.get("included_for_comparison"),
+                        "exclusion_reason": v.get("exclusion_reason"),
+                        "policy_label": v.get("policy_label"),
+                        "terminal_soc_deviation_mwh": v.get("terminal_soc_deviation_mwh"),
+                        "metrics_match": v.get("trace_metrics_match"),
+                        "trace_periods": len(v.get("trace") or []),
+                        "periods_expected": v.get("periods_expected"),
                         "realized_operating_cost_usd": v.get("realized_operating_cost_usd"),
                         "unmet_energy_mwh": v.get("unmet_energy_mwh"),
-                        "solver": v.get("solver")}
+                        "solver": v.get("solver"),
+                        "provenance": {
+                            "problem_sha256": v.get("problem_sha256"),
+                            "realized_conditions_sha256": v.get("realized_conditions_sha256"),
+                            "forecast_sha256": v.get("forecast_sha256"),
+                            "config_sha256": v.get("config_sha256"),
+                        }}
                     for k, v in payload["results"].items()},
     }
     s = out / "stress_benchmark_summary.json"

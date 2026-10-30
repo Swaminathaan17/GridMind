@@ -27,11 +27,19 @@ split into two stages:
 Non-anticipativity is enforced exactly by equality coupling of every first-stage
 decision across all scenarios (see ``_nonanticipativity``). With
 ``lead_periods = 0`` the model degenerates to *wait-and-see* (each scenario
-optimised independently); with ``lead_periods = periods`` it is a single
-deterministic schedule over the mean. The default is ``lead_periods = 1``: the
-first hour is committed before uncertainty resolves and later hours adapt. This
-is a genuine two-stage (not clairvoyant) model; intermediate branching times are
-*not* modelled (that would need a scenario tree).
+optimised independently); with ``lead_periods = periods`` the entire battery
+trajectory is shared across scenarios, i.e. a single committed full-horizon
+battery schedule with scenario recourse for generation/flows/unmet. The default
+is ``lead_periods = 1``: the first hour is committed before uncertainty resolves
+and later battery hours adapt per scenario. This is a genuine two-stage (not
+clairvoyant) model; intermediate branching times are *not* modelled (that would
+need a scenario tree).
+
+The Stage 5C open-loop stochastic benchmark policy deliberately uses
+``lead_periods = periods`` so that its executed battery trajectory is exactly the
+trajectory whose terminal SoC was optimized. That is a **committed open-loop
+battery policy**, not adaptive recourse; the rolling-horizon benchmark methods
+instead use a short ``lead_periods`` window and re-plan causally.
 
 Objective (all components in USD)
 ---------------------------------
@@ -94,7 +102,10 @@ class RiskConfig:
     ``risk_weight`` (lambda) in [0, 1]: 0 = risk-neutral expected cost, 1 = pure
     CVaR. ``cvar_alpha`` is the CVaR confidence level in (0, 1) (e.g. 0.95 = the
     mean of the worst 5% of scenario costs). ``lead_periods`` is the number of
-    first-stage periods whose decisions must be identical across scenarios.
+    first-stage periods whose battery decisions must be identical across
+    scenarios. ``lead_periods = periods`` therefore yields a fully committed
+    full-horizon battery schedule and is the setting used by the Stage 5C
+    open-loop stochastic policy.
     """
     risk_weight: float = 0.5
     cvar_alpha: float = 0.95

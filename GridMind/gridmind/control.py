@@ -1034,7 +1034,7 @@ def run_rolling_horizon(problem: ScheduleProblem, config: ControlConfig | None =
         total_cost += cost
         period_costs.append(cost)
         total_unmet_energy += dt * sum(unmet.values())
-        total_throughput += dt * sum(discharge.values())
+        total_throughput += dt * (sum(charge.values()) + sum(discharge.values()))
         total_battery_curtailed += dt * sum(battery_curtailed_mw.values())
         total_battery_charge_curtailed += dt * sum(battery_charge_curtailed_mw.values())
         total_renewable_curtailed += dt * sum(renewable_curtailed_mw.values())
@@ -1238,7 +1238,7 @@ def run_open_loop_baseline(problem: ScheduleProblem, *, battery_mode: str = "lp"
         charge = {b: res.charge[b][t] for b in res.charge}
         planned_costs.append(_period_realized_cost(problem, t, dispatch, unmet, discharge, charge))
         planned_unmet_energy += dt * sum(unmet.values())
-        planned_throughput += dt * sum(discharge.values())
+        planned_throughput += dt * (sum(charge.values()) + sum(discharge.values()))
     planned_risk = _realized_risk(planned_costs, cvar_confidence)
     planned_validation = verify_executed_trajectory(
         problem, realized_demand, realized_avail,
@@ -1283,7 +1283,7 @@ def run_open_loop_baseline(problem: ScheduleProblem, *, battery_mode: str = "lp"
         unmet = {n: float(v) for n, v in executed_plan["unmet"].items()}
         costs.append(_period_realized_cost(problem, t, dispatch, unmet, discharge, charge))
         unmet_energy += dt * sum(unmet.values())
-        throughput += dt * sum(discharge.values())
+        throughput += dt * (sum(charge.values()) + sum(discharge.values()))
         battery_curtailed += dt * sum(
             float(v) for v in executed_plan.get("battery_curtailed_mw", {}).values())
         battery_charge_curtailed += dt * sum(

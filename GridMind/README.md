@@ -202,6 +202,9 @@ difference; where policies coincide, they are reported as coinciding.
 | `gridmind/uncertainty.py` | reproducible synthetic uncertainty scenarios (demand/renewable), probabilities, stress families |
 | `gridmind/stochastic.py` | two-stage risk-aware stochastic scheduler (expected cost + CVaR, non-anticipativity) |
 | `gridmind/risk_eval.py` | out-of-sample policy evaluation and deterministic / risk-neutral / risk-aware comparison |
+| `gridmind/control.py` | rolling-horizon controller, realized re-dispatch, stored-trace execution records |
+| `gridmind/stress.py` | causal stress environments, executed-trace capture/validation, method comparability |
+| `gridmind/stress_bench.py` | Stage 5C benchmark orchestration and schema-v2 inclusion/exclusion artifacts |
 | `gridmind/cli.py` | command-line interface |
 | `data/sample_network.json` | documented sample network |
 | `data/sample_horizon.json` | committed 24x1h synthetic day (profiles, two batteries, initial dispatch) |
@@ -440,6 +443,52 @@ the full comparison record (both `controller` and `baseline` sub-records plus th
 schema-versioned (`CONTROL_SCHEMA_VERSION = 2`). Stage 5A outputs under `results/stage5a_benchmark/`
 are never touched.
 
+### Stage 5C - stress benchmark and executable-policy integrity
+
+`gridmind/stress_bench.py` compares six methods on **identical realized stress conditions**:
+deterministic open-loop, two committed full-horizon open-loop stochastic battery policies
+(risk-neutral/risk-aware), two causal receding-horizon stochastic hybrids (risk-neutral/risk-aware), and
+the deterministic rolling-horizon controller. The benchmark never re-solves a method to manufacture a
+validation result: each method stores the per-period trajectory it actually executed, and inclusion is
+decided from that stored trace.
+
+* Every result separates `solver_status` (what the optimiser returned) from `policy_status` (what the
+  executed policy achieved). The legacy `status` field equals `policy_status`, so a solver-optimal but
+  physically infeasible execution is never reported as `optimal`.
+* Each stored trace row contains realized demand/availability, initial and final SoC, executed
+  dispatch/flows/charge/discharge/unmet, committed battery actions, and the realized operating cost.
+  `validation_status` is `passed`, `failed`, `incomplete`, `missing_trace`, or `skipped`; only
+  solver-optimal results with a complete, independently validated trace are included in comparisons.
+* Terminal SoC, trace/reported metric consistency, period coverage, and battery-mode feasibility are
+  checked independently. Solver-optimal but policy-infeasible results are listed in `exclusions` with an
+  explicit reason and are never dropped silently.
+* `battery_mode="lp"` permits simultaneous charge/discharge; `exclusive` rejects it. Invalid SoC or
+  power transitions are always explicit errors, never silently clamped.
+* `stochastic_risk_neutral` and `stochastic_risk_aware` are **committed full-horizon open-loop battery
+  policies**. The stochastic model is solved with its battery decisions shared across all scenarios for
+  every period (`lead_periods = periods` inside the policy), so the executed battery trajectory is
+  exactly the trajectory whose terminal SoC was optimized. Generator dispatch, flows, and unserved
+  energy are still re-dispatched at realized conditions each period. The caller's `lead_periods` is
+  recorded as `requested_lead_periods`; the policy config records
+  `committed_battery_periods = periods` and `commitment_horizon = "full"`. This is a committed
+  open-loop policy, not adaptive recourse: there is no scenario tree and no re-planning.
+* `stochastic_rolling_risk_neutral` and `stochastic_rolling_risk_aware` are **causal receding-horizon
+  stochastic hybrids**. At each step they sample scenario paths only from forecasts available at that
+  step, solve the unchanged two-stage model over a short window, execute only the current-period battery
+  commitment, re-dispatch generators/flows/unserved energy at realized conditions, and advance the exact
+  SoC. The next step re-plans from the new state. This is a causal commitment policy, not a full
+  multistage scenario-tree optimum; its policy label records
+  `no_scenario_tree`.
+* Benchmark artifacts are schema-versioned (`STRESS_BENCH_SCHEMA_VERSION = 2`) and include problem,
+  realized-conditions, forecast, and configuration hashes. Historical Stage 5C v1 artifacts under
+  `results/stage5c_corrected_smoke_20261028_14/` and `results/stage5c_resilience/` are preserved
+  unchanged and must not be mixed with v2 comparisons. The historical schema-v2 smoke run
+  `results/stage5c_batch2_smoke_20261030_103247/` is also preserved unchanged; it recorded the earlier
+  zeroed-post-lead execution defect, so its two stochastic baselines were excluded for terminal-SoC
+  violations. After the Stage 5C finalization, the open-loop stochastic policies execute the full
+  committed battery schedule and pass executed-trace validation; the post-fix smoke run
+  `results/stage5c_final_smoke_20261030_123721/` includes and validates all six methods.
+
 ## Baseline and units
 
 All costs are USD for one interval (`interval_hours`, default 1 h) on the single-period path, or for
@@ -460,10 +509,11 @@ network** (they are references, not deployable schedules):
 
 ## Verification status (read this)
 
-* 184 tests: solver-free tests (data model, scenarios, determinism, validator, baselines, failure
+* 211 tests: solver-free tests (data model, scenarios, determinism, validator, baselines, failure
   handling, scenario generation, model structure, CVaR/VaR metrics, experiment statistics, control
-  forecast model) plus solver tests for both models, the stochastic layer, the comparative benchmark
-  and the rolling-horizon controller. Solver tests skip with a reason when no solver is found.
+  forecast model) plus solver tests for both models, the stochastic layer, the comparative benchmark,
+  the rolling-horizon controller, and Stage 5C trace/inclusion integrity. Solver tests skip with a
+  reason when no solver is found.
 * Every multi-period solve is cross-checked two ways: the independent validator
   (`gridmind/validation.py`, no Pyomo) re-derives all constraints and the objective from the data,
   and `tests/reference_lp_mp.py` rebuilds the whole LP with `scipy.optimize.linprog` (HiGHS) and
@@ -476,7 +526,7 @@ network** (they are references, not deployable schedules):
   "pure-CVaR in-sample CVaR <= risk-neutral CVaR", "wait-and-see expected cost <= committed expected
   cost", non-anticipativity equalities across scenarios, and infeasible scenarios returning no numbers.
 * The author's environment: Python 3.11 venv, pyomo 6.10.1, highspy (appsi_highs); the full suite
-  (184 tests) passes with HiGHS. Same seed => same scenarios and objectives across runs and solvers.
+  (211 tests) passes with HiGHS. Same seed => same scenarios and objectives across runs and solvers.
 * Stage 5A benchmark integrity is tested: two runs of the same seeds produce byte-identical
   `experiment_config.json` and `per_scenario_metrics.csv` (only wall-clock timings differ); all three
   policies are asserted to evaluate the **same** holdout scenario ids; missing/failed policies are
@@ -492,6 +542,11 @@ network** (they are references, not deployable schedules):
   and baseline execution; regression tests cover executed-trajectory feasibility, charge curtailment
   before unmet demand, mode-aware LP/exclusive feasibility, and the re-dispatched (not as-planned)
   baseline comparison.
+* Stage 5C integrity is tested for stored-trace validation without a second solve, exact SoC/throughput
+  continuity, incomplete-trace exclusion precedence, zero-eligible-method truthfulness, custom
+  problem/config provenance, selected LP/MIP battery-mode propagation, and the causal stochastic hybrid:
+  changing only future realized conditions leaves its current-period executed actions unchanged, and
+  executed battery actions never exceed the committed first-stage actions.
 
 ## Assumptions and limitations
 
