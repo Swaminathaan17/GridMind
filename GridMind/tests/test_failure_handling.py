@@ -142,6 +142,54 @@ def test_probe_caches_failures(monkeypatch):
     _MIP_PROBE_CACHE.pop("__fake__", None)
 
 
+
+def test_probe_cache_invalidates_when_solver_executable_changes(monkeypatch, tmp_path):
+    from gridmind.solver import ENV_SOLVER_PATH
+
+    first = tmp_path / "solver-a"
+    second = tmp_path / "solver-b"
+    first.mkdir()
+    second.mkdir()
+    (first / "glpsol.exe").write_text("solver-a")
+    (second / "glpsol.exe").write_text("solver-b")
+
+    calls = {"n": 0}
+
+    def fake_make(name):
+        calls["n"] += 1
+        raise SolverUnavailableError("simulated probe failure")
+
+    monkeypatch.setattr("gridmind.solver._make", fake_make)
+    monkeypatch.setenv(ENV_SOLVER_PATH, str(first))
+    assert _probe_mip("glpk")[0] is False
+    assert _probe_mip("glpk")[0] is False
+    assert calls["n"] == 1
+
+    monkeypatch.setenv(ENV_SOLVER_PATH, str(second))
+    assert _probe_mip("glpk")[0] is False
+    assert calls["n"] == 2
+
+
+def test_probe_cache_invalidates_when_solver_binary_is_replaced(monkeypatch, tmp_path):
+    from gridmind.solver import ENV_SOLVER_PATH
+
+    executable = tmp_path / "glpsol.exe"
+    executable.write_text("first-binary")
+    monkeypatch.setenv(ENV_SOLVER_PATH, str(executable))
+
+    calls = {"n": 0}
+
+    def fake_make(name):
+        calls["n"] += 1
+        raise SolverUnavailableError("simulated probe failure")
+
+    monkeypatch.setattr("gridmind.solver._make", fake_make)
+    assert _probe_mip("glpk")[0] is False
+    executable.write_text("replacement-binary-with-different-size")
+    assert _probe_mip("glpk")[0] is False
+    assert calls["n"] == 2
+
+
 def test_probe_rejects_nonintegral(monkeypatch):
     """A solver that returns the LP relaxation (non-integral x=y=0.75) must fail
     the probe even with an apparently optimal termination."""
