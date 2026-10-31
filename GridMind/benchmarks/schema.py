@@ -376,6 +376,96 @@ def validate_coverage_artifact(payload: Any) -> list[str]:
     return errors
 
 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) \
+        and math.isfinite(float(value))
+
+
+def validate_scalability_artifact(payload: Any) -> list[str]:
+    errors: list[str] = []
+    record = _require_mapping(payload, "scalability", errors)
+    if record is None:
+        return errors
+    if record.get("kind") != SCALABILITY_KIND:
+        errors.append(f"scalability.kind must be {SCALABILITY_KIND!r}")
+    if record.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
+        errors.append(f"scalability.schema_version must be {ARTIFACT_SCHEMA_VERSION}")
+    if not is_timestamp(record.get("generated_at_utc")):
+        errors.append("scalability.generated_at_utc must be an ISO-8601 UTC timestamp ending in Z")
+    if not isinstance(record.get("environment"), Mapping):
+        errors.append("scalability.environment must be an object")
+    errors.extend(validate_provenance(record.get("provenance"), "scalability.provenance"))
+    thresholds = _require_mapping(record.get("thresholds"), "scalability.thresholds", errors)
+    if thresholds is not None:
+        for key in ("max_time_exponent", "max_rss_growth_mb", "max_rss_growth_factor",
+                    "leak_tolerance_mb", "leak_tolerance_fraction"):
+            if not _is_number(thresholds.get(key)) or float(thresholds.get(key)) <= 0:
+                errors.append(f"scalability.thresholds.{key} must be finite and > 0")
+
+    families = _require_mapping(record.get("families"), "scalability.families", errors)
+    if families is not None:
+        if not families:
+            errors.append("scalability.families must not be empty")
+        for kind, family in families.items():
+            label = f"scalability.families[{kind!r}]"
+            item = _require_mapping(family, label, errors)
+            if item is None:
+                continue
+            runs = item.get("runs")
+            if not isinstance(runs, list) or not runs:
+                errors.append(f"{label}.runs must be a non-empty list")
+                continue
+            for index, run in enumerate(runs):
+                run_label = f"{label}.runs[{index}]"
+                result = _require_mapping(run, run_label, errors)
+                if result is None:
+                    continue
+                status = result.get("status")
+                if status not in ("ok", "error"):
+                    errors.append(f"{run_label}.status must be 'ok' or 'error'")
+                if status == "ok":
+                    if result.get("solver_status") != "optimal":
+                        errors.append(f"{run_label}.solver_status must be 'optimal'")
+                    if result.get("validation_passed") is not True:
+                        errors.append(f"{run_label}.validation_passed must be true")
+                    for key in ("wall_seconds", "peak_rss_mb"):
+                        if not _is_number(result.get(key)) or float(result.get(key)) < 0:
+                            errors.append(f"{run_label}.{key} must be finite and >= 0")
+                    if not _is_number(result.get("objective_usd")):
+                        errors.append(f"{run_label}.objective_usd must be finite")
+                elif not isinstance(result.get("error"), str) or not result.get("error"):
+                    errors.append(f"{run_label}.error must be a non-empty string")
+
+    leak = _require_mapping(record.get("leak"), "scalability.leak", errors)
+    if leak is not None:
+        if not isinstance(leak.get("repetitions"), int) or leak.get("repetitions") < 2:
+            errors.append("scalability.leak.repetitions must be an integer >= 2")
+        if not isinstance(leak.get("leak_suspected"), bool):
+            errors.append("scalability.leak.leak_suspected must be a boolean")
+        if not _is_number(leak.get("rss_growth_mb")):
+            errors.append("scalability.leak.rss_growth_mb must be finite")
+
+    checks = record.get("checks")
+    if not isinstance(checks, list):
+        errors.append("scalability.checks must be a list")
+    else:
+        for index, check in enumerate(checks):
+            label = f"scalability.checks[{index}]"
+            item = _require_mapping(check, label, errors)
+            if item is not None and not isinstance(item.get("passed"), bool):
+                errors.append(f"{label}.passed must be a boolean")
+
+    summary = _require_mapping(record.get("summary"), "scalability.summary", errors)
+    if summary is not None:
+        if not isinstance(summary.get("passed"), bool):
+            errors.append("scalability.summary.passed must be a boolean")
+        for key in ("checks", "failures"):
+            if not isinstance(summary.get(key), int) or isinstance(summary.get(key), bool) \
+                    or summary.get(key) < 0:
+                errors.append(f"scalability.summary.{key} must be a non-negative integer")
+    return errors
+
+
 def validate_hash_map(value: Any, label: str, *, allow_empty: bool = True) -> list[str]:
     errors: list[str] = []
     mapping = _require_mapping(value, label, errors)
