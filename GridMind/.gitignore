@@ -5,5 +5,10 @@ __pycache__/
 *.pyc
 results/
 *.summary.json
+benchmarks/runs/
+benchmarks/out/
+*.egg-info/
+build/
+dist/
 Thumbs.db
 .DS_Store
