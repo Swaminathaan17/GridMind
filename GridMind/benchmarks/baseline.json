@@ -1,0 +1,590 @@
+{
+  "generated_at_utc": "2026-10-31T05:44:10Z",
+  "harness": {
+    "canonicalisation": "timing keys removed; floats rounded to 6 decimals; keys sorted before SHA-256",
+    "command": "python -m benchmarks.qualification measure",
+    "repetitions": 3,
+    "timeout_seconds": 1800.0,
+    "workloads": [
+      "smoke",
+      "benchmark",
+      "mp_benchmark",
+      "stochastic_20",
+      "experiment_small",
+      "experiment_default",
+      "control_default",
+      "stress_default"
+    ]
+  },
+  "kind": "gridmind_qualification_baseline",
+  "reference_environment": {
+    "captured_at_utc": "2026-10-31T05:20:09Z",
+    "git": {
+      "branch": "stage-5d-operational-readiness",
+      "commit": "20eb70e786f048a8a6bdd5e2798314c920992020",
+      "dirty": false,
+      "root": "C:/Users/DELL/Downloads/GridMind-Stage5D"
+    },
+    "memory_total_mb": 16198.2,
+    "packages": {
+      "highspy": "1.15.1",
+      "matplotlib": "3.11.2",
+      "numpy": "2.4.6",
+      "pandas": "3.1.0",
+      "pyomo": "6.10.1",
+      "pytest": "9.2.0",
+      "scipy": "1.17.1"
+    },
+    "platform": {
+      "cpu_count": 8,
+      "machine": "AMD64",
+      "platform": "Windows-10-10.0.26300-SP0",
+      "processor": "Intel64 Family 6 Model 142 Stepping 12, GenuineIntel",
+      "release": "10",
+      "system": "Windows",
+      "version": "10.0.26300"
+    },
+    "python": {
+      "executable": "C:\\Users\\DELL\\Downloads\\GridMind-Stage5D\\.venv\\Scripts\\python.exe",
+      "implementation": "CPython",
+      "version": "3.11.17",
+      "version_full": "3.11.17 (main, Oct  3 2026, 01:03:09) [MSC v.1944 64 bit (AMD64)]"
+    },
+    "schema_version": 1,
+    "solver_inventory_error": null,
+    "solvers": [
+      {
+        "available": false,
+        "detail": "solver 'glpk' not found. Install GLPK and add it to PATH or set GRIDMIND_SOLVER_PATH",
+        "solver": "glpk",
+        "supports_mip": null
+      },
+      {
+        "available": false,
+        "detail": "solver 'cbc' not found. Install it or set GRIDMIND_SOLVER",
+        "solver": "cbc",
+        "supports_mip": null
+      },
+      {
+        "available": true,
+        "detail": "usable",
+        "mip_detail": "ok: binary optimum -1 reached",
+        "solver": "appsi_highs",
+        "supports_mip": true
+      }
+    ]
+  },
+  "schema_version": 1,
+  "threshold_policy": {
+    "formula": "wall/solver limit = ceil(median observed x headroom, 3 dp); RSS limit = ceil(max observed x headroom + floor, 1 dp)",
+    "rationale": "Time limits use the median of the committed baseline repetitions so a single scheduler or I/O outlier cannot inflate the gate; RSS uses the maximum observed value. The headroom is fixed in this file so every threshold can be recomputed from the measured samples.",
+    "reference_machine_only": true,
+    "rss_floor_mb": 16.0,
+    "rss_headroom_factor": 1.25,
+    "solver_headroom_factor": 1.5,
+    "wall_headroom_factor": 1.5
+  },
+  "workloads": {
+    "benchmark": {
+      "decision_sha256": "2af72b2cbf1fec8acedcd077dfc7d6ae9235531ed21dd9c1497475c6f1242d82",
+      "description": "Single-period batch: core scenarios + 20 random (seed 42).",
+      "measured": {
+        "peak_rss_mb": {
+          "count": 3,
+          "max": 98.7,
+          "median": 98.7,
+          "min": 98.2,
+          "samples": [
+            98.2,
+            98.7,
+            98.7
+          ]
+        },
+        "repetitions": 3,
+        "solver_seconds": {
+          "count": 3,
+          "max": 0.486546,
+          "median": 0.484293,
+          "min": 0.464128,
+          "samples": [
+            0.4641282,
+            0.4842928,
+            0.4865465
+          ]
+        },
+        "wall_seconds": {
+          "count": 3,
+          "max": 0.662164,
+          "median": 0.661197,
+          "min": 0.634849,
+          "samples": [
+            0.634849,
+            0.661197,
+            0.662164
+          ]
+        }
+      },
+      "parameters": {
+        "core_scenarios": 4,
+        "n_random": 20,
+        "n_scenarios": 24,
+        "network": "data/sample_network.json",
+        "scenario_ids": [
+          "normal",
+          "peak_demand",
+          "low_renewable",
+          "line_outage",
+          "rand-42-000",
+          "rand-42-001",
+          "rand-42-002",
+          "rand-42-003",
+          "rand-42-004",
+          "rand-42-005",
+          "rand-42-006",
+          "rand-42-007",
+          "rand-42-008",
+          "rand-42-009",
+          "rand-42-010",
+          "rand-42-011",
+          "rand-42-012",
+          "rand-42-013",
+          "rand-42-014",
+          "rand-42-015",
+          "rand-42-016",
+          "rand-42-017",
+          "rand-42-018",
+          "rand-42-019"
+        ],
+        "seed": 42
+      },
+      "solver": "appsi_highs",
+      "thresholds": {
+        "peak_rss_mb_max": 139.4,
+        "solver_seconds_max": 0.727,
+        "wall_seconds_max": 0.992
+      }
+    },
+    "control_default": {
+      "decision_sha256": "af7b2fae0feec5bec7538ea2f058d74e683cc824a1e93b2722c5236de92a14db",
+      "description": "Default lookahead-6 rolling-horizon control.",
+      "measured": {
+        "peak_rss_mb": {
+          "count": 3,
+          "max": 107.2,
+          "median": 106.9,
+          "min": 106.8,
+          "samples": [
+            106.8,
+            106.9,
+            107.2
+          ]
+        },
+        "repetitions": 3,
+        "solver_seconds": {
+          "count": 3,
+          "max": 2.192229,
+          "median": 2.164572,
+          "min": 2.093394,
+          "samples": [
+            2.0933944,
+            2.1645724,
+            2.1922291
+          ]
+        },
+        "wall_seconds": {
+          "count": 3,
+          "max": 5.496378,
+          "median": 5.335605,
+          "min": 5.097207,
+          "samples": [
+            5.097207,
+            5.335605,
+            5.496378
+          ]
+        }
+      },
+      "parameters": {
+        "battery_mode": "lp",
+        "horizon": "data/sample_horizon.json",
+        "lookahead": 6,
+        "mode": "deterministic",
+        "seed": 20260201
+      },
+      "solver": "appsi_highs",
+      "thresholds": {
+        "peak_rss_mb_max": 150.0,
+        "solver_seconds_max": 3.247,
+        "wall_seconds_max": 8.004
+      }
+    },
+    "experiment_default": {
+      "decision_sha256": "e3dec3847c50a71d7da0ccbffcfe66b8aff0db3b89847e6236cd1fb3d3f38cd4",
+      "description": "Default 5 seeds x 40 scenarios experiment.",
+      "measured": {
+        "peak_rss_mb": {
+          "count": 3,
+          "max": 177.2,
+          "median": 177.2,
+          "min": 176.8,
+          "samples": [
+            176.8,
+            177.2,
+            177.2
+          ]
+        },
+        "repetitions": 3,
+        "solver_seconds": {
+          "count": 3,
+          "max": 500.669157,
+          "median": 494.671805,
+          "min": 409.988705,
+          "samples": [
+            409.9887053,
+            494.6718054,
+            500.669157
+          ]
+        },
+        "wall_seconds": {
+          "count": 3,
+          "max": 171.752292,
+          "median": 169.723052,
+          "min": 140.367866,
+          "samples": [
+            140.367866,
+            169.723052,
+            171.752292
+          ]
+        }
+      },
+      "parameters": {
+        "battery_mode": "lp",
+        "cvar_alpha": 0.95,
+        "holdout_fraction": 0.5,
+        "horizon": "data/sample_horizon.json",
+        "lead_periods": 1,
+        "n_scenarios": 40,
+        "risk_weight": 0.5,
+        "seeds": [
+          20260101,
+          20260102,
+          20260103,
+          20260104,
+          20260105
+        ]
+      },
+      "solver": "appsi_highs",
+      "thresholds": {
+        "peak_rss_mb_max": 237.5,
+        "solver_seconds_max": 742.008,
+        "wall_seconds_max": 254.585
+      }
+    },
+    "experiment_small": {
+      "decision_sha256": "b3fa4e53f91d99788b2f67dc3ef0f99ab3f818ef3042e36a948bf2c3f141b0d1",
+      "description": "2 seeds x 20 scenarios comparative experiment.",
+      "measured": {
+        "peak_rss_mb": {
+          "count": 3,
+          "max": 135.4,
+          "median": 135.3,
+          "min": 135.3,
+          "samples": [
+            135.3,
+            135.3,
+            135.4
+          ]
+        },
+        "repetitions": 3,
+        "solver_seconds": {
+          "count": 3,
+          "max": 850.237666,
+          "median": 91.123762,
+          "min": 60.911635,
+          "samples": [
+            60.9116347,
+            91.1237623,
+            850.2376658
+          ]
+        },
+        "wall_seconds": {
+          "count": 3,
+          "max": 284.22766,
+          "median": 31.353121,
+          "min": 20.954496,
+          "samples": [
+            20.954496,
+            31.353121,
+            284.22766
+          ]
+        }
+      },
+      "parameters": {
+        "battery_mode": "lp",
+        "cvar_alpha": 0.95,
+        "holdout_fraction": 0.5,
+        "horizon": "data/sample_horizon.json",
+        "lead_periods": 1,
+        "n_scenarios": 20,
+        "risk_weight": 0.5,
+        "seeds": [
+          42,
+          43
+        ]
+      },
+      "solver": "appsi_highs",
+      "thresholds": {
+        "peak_rss_mb_max": 185.3,
+        "solver_seconds_max": 136.686,
+        "wall_seconds_max": 47.03
+      }
+    },
+    "mp_benchmark": {
+      "decision_sha256": "5f4970556f630d12acd379fa8d5bd83f848d1ca7eabca5a0b21c214dce57400c",
+      "description": "24-period batch: core scenarios + 10 random (seed 42).",
+      "measured": {
+        "peak_rss_mb": {
+          "count": 3,
+          "max": 116.3,
+          "median": 115.9,
+          "min": 115.8,
+          "samples": [
+            115.8,
+            115.9,
+            116.3
+          ]
+        },
+        "repetitions": 3,
+        "solver_seconds": {
+          "count": 3,
+          "max": 4.928937,
+          "median": 4.924519,
+          "min": 4.616979,
+          "samples": [
+            4.6169785,
+            4.9245189,
+            4.9289375
+          ]
+        },
+        "wall_seconds": {
+          "count": 3,
+          "max": 5.973998,
+          "median": 5.963372,
+          "min": 5.74973,
+          "samples": [
+            5.74973,
+            5.963372,
+            5.973998
+          ]
+        }
+      },
+      "parameters": {
+        "battery_mode": "lp",
+        "core_scenarios": 7,
+        "horizon": "data/sample_horizon.json",
+        "n_random": 10,
+        "n_scenarios": 17,
+        "scenario_ids": [
+          "h-normal",
+          "h-evening-spike",
+          "h-renewable-drop",
+          "h-line-storm",
+          "h-generator-outage",
+          "h-feeder-loss",
+          "h-compound",
+          "hrand-42-000",
+          "hrand-42-001",
+          "hrand-42-002",
+          "hrand-42-003",
+          "hrand-42-004",
+          "hrand-42-005",
+          "hrand-42-006",
+          "hrand-42-007",
+          "hrand-42-008",
+          "hrand-42-009"
+        ],
+        "seed": 42
+      },
+      "solver": "appsi_highs",
+      "thresholds": {
+        "peak_rss_mb_max": 161.4,
+        "solver_seconds_max": 7.387,
+        "wall_seconds_max": 8.946
+      }
+    },
+    "smoke": {
+      "decision_sha256": "db88da19b4d201b5458be37c0634323dd02bb3a8d02d736219536e9685528f2d",
+      "description": "Fast single-period smoke workload for CI gates.",
+      "measured": {
+        "peak_rss_mb": {
+          "count": 3,
+          "max": 96.1,
+          "median": 95.9,
+          "min": 95.9,
+          "samples": [
+            95.9,
+            95.9,
+            96.1
+          ]
+        },
+        "repetitions": 3,
+        "solver_seconds": {
+          "count": 3,
+          "max": 0.043977,
+          "median": 0.039847,
+          "min": 0.038749,
+          "samples": [
+            0.0387494,
+            0.039847,
+            0.0439767
+          ]
+        },
+        "wall_seconds": {
+          "count": 3,
+          "max": 0.08039,
+          "median": 0.0791,
+          "min": 0.0754,
+          "samples": [
+            0.0754,
+            0.0791,
+            0.08039
+          ]
+        }
+      },
+      "parameters": {
+        "core_scenarios": 1,
+        "n_random": 1,
+        "n_scenarios": 2,
+        "network": "data/sample_network.json",
+        "scenario_ids": [
+          "normal",
+          "rand-42-000"
+        ],
+        "seed": 42
+      },
+      "solver": "appsi_highs",
+      "thresholds": {
+        "peak_rss_mb_max": 136.2,
+        "solver_seconds_max": 0.06,
+        "wall_seconds_max": 0.119
+      }
+    },
+    "stochastic_20": {
+      "decision_sha256": "e6d4ff469140a8b81f9f756482aa588a95eaf457e26a845688ac12e3029d4963",
+      "description": "20-scenario two-stage comparison (seed 42).",
+      "measured": {
+        "peak_rss_mb": {
+          "count": 3,
+          "max": 133.8,
+          "median": 133.6,
+          "min": 132.8,
+          "samples": [
+            132.8,
+            133.6,
+            133.8
+          ]
+        },
+        "repetitions": 3,
+        "solver_seconds": {
+          "count": 3,
+          "max": 14.403837,
+          "median": 14.27045,
+          "min": 13.536703,
+          "samples": [
+            13.5367029,
+            14.2704501,
+            14.4038371
+          ]
+        },
+        "wall_seconds": {
+          "count": 3,
+          "max": 15.748071,
+          "median": 15.534679,
+          "min": 14.808593,
+          "samples": [
+            14.808593,
+            15.534679,
+            15.748071
+          ]
+        }
+      },
+      "parameters": {
+        "battery_mode": "lp",
+        "cvar_alpha": 0.95,
+        "holdout_fraction": 0.5,
+        "horizon": "data/sample_horizon.json",
+        "lead_periods": 1,
+        "n_scenarios": 20,
+        "risk_weight": 0.5,
+        "seed": 42
+      },
+      "solver": "appsi_highs",
+      "thresholds": {
+        "peak_rss_mb_max": 183.3,
+        "solver_seconds_max": 21.406,
+        "wall_seconds_max": 23.303
+      }
+    },
+    "stress_default": {
+      "decision_sha256": "e7d07ff703c62fb0d494f89173ab55d6236e209451b5dbb83b7f53330869ecef",
+      "description": "Default six-method Stage 5C stress benchmark.",
+      "measured": {
+        "peak_rss_mb": {
+          "count": 3,
+          "max": 176.2,
+          "median": 175.9,
+          "min": 175.2,
+          "samples": [
+            175.2,
+            175.9,
+            176.2
+          ]
+        },
+        "repetitions": 3,
+        "solver_seconds": {
+          "count": 3,
+          "max": 18.83551,
+          "median": 15.85731,
+          "min": 14.080464,
+          "samples": [
+            14.08046365,
+            15.857309888,
+            18.8355101
+          ]
+        },
+        "wall_seconds": {
+          "count": 3,
+          "max": 108.203856,
+          "median": 96.509741,
+          "min": 90.553523,
+          "samples": [
+            90.553523,
+            96.509741,
+            108.203856
+          ]
+        }
+      },
+      "parameters": {
+        "battery_mode": "lp",
+        "lead_periods": 1,
+        "lookahead": 6,
+        "methods": [
+          "deterministic_open_loop",
+          "stochastic_risk_neutral",
+          "stochastic_risk_aware",
+          "stochastic_rolling_risk_neutral",
+          "stochastic_rolling_risk_aware",
+          "rolling_horizon"
+        ],
+        "n_scenarios_stochastic": 20,
+        "seed": 20260301,
+        "workload": "stress_default"
+      },
+      "solver": "appsi_highs",
+      "thresholds": {
+        "peak_rss_mb_max": 236.3,
+        "solver_seconds_max": 23.786,
+        "wall_seconds_max": 144.765
+      }
+    }
+  }
+}

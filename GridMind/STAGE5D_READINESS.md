@@ -3,13 +3,14 @@
 **Repo:** `C:\Users\DELL\Downloads\GridMind` / inner `GridMind`
 **Branch:** `stage-5d-operational-readiness`, based on `6a9c7e5`
 **Environment:** Python 3.11.17, pyomo 6.10.1, highspy/appsi_highs MIP-capable
-**Tests:** 211 passed (full suite, verified 2026-10-30)
+**Tests:** 233 passed (full suite, verified 2026-10-31)
 
 ## Status summary
 - **Stage 5B:** Corrected and audited. Schema bumped to v3 with embedded realized demand/availability rows, problem hash, initial state. Executed trajectories independently validated; baseline re-dispatched at realized conditions. Fair comparison artifacts in `results/stage5b_audited/`. Historical `results/stage5b_control/` marked invalid and preserved unchanged.
 - **INR localization:** Traceable USD->INR conversion added (`gridmind/currency.py`) with explicit configurable rate, provenance (source/date/direction), Indian formatting, USD-preserving conversion tree, traceability table, and tests. Non-overwriting artifacts in `results/stage5b_inr_final/` (USD canonical, INR derived).
 - **Stage 5C:** Framework implemented and integrity-finalized (schema v2). Methods now store the exact executed trajectory; validation and comparison inclusion use that trace without re-solving. `solver_status` is separated from `policy_status`; solver-optimal but policy-infeasible executions are explicitly excluded. The benchmark covers six methods: deterministic open-loop, two committed full-horizon open-loop stochastic battery policies (risk-neutral/risk-aware), two causal receding-horizon stochastic hybrids (risk-neutral/risk-aware), and deterministic rolling-horizon. The open-loop stochastic policies commit the full-horizon battery schedule (matching the optimized terminal-SoC trajectory) and re-dispatch generation/flows/unmet at realized conditions; the hybrids re-plan causally from short windows, execute only current-period battery actions, and advertise `no_scenario_tree`. Historical v1 artifacts remain preserved.
 - **Stage 5D:** Operational-readiness implementation in progress. CLI metadata refreshed; MIP probe cache now tracks executable identity, with regression tests for path and binary replacement.
+- **Stage 5E P0:** Qualification foundation complete: reproducible packaging/CI, pinned dependencies, committed environment/performance baseline, deterministic decision hashing and performance gate. See `STAGE5E_QUALIFICATION.md`. Full Stage 5E (E4-E9) remains open.
 
 ## Evidence (key artifacts)
 - `results/stage5b_audited/audit_summary.json` (verdict: PASS WITH CORRECTIONS)
@@ -19,6 +20,7 @@
 - `results/stage5c_batch2_smoke_20261030_103247/stress_benchmark.json`, `stress_benchmark_summary.json` (historical schema v2, six methods, preserved; pre-finalization execution defect)
 - `results/stage5c_final_smoke_20261030_123721/stress_benchmark.json`, `stress_benchmark_summary.json` (post-finalization schema v2; all six methods included, validated, and execution-complete)
 - `tests/test_control.py`, `tests/test_cli.py`, `tests/test_currency.py`, `tests/test_stress_corrections.py`, `tests/test_stress_benchmark.py` all passing
+- `benchmarks/baseline.json`, `STAGE5E_QUALIFICATION.md` (Stage 5E P0 baseline, thresholds and gate evidence)
 
 ## Risks / gaps
 - Stage 5C matrix is a small smoke run; full matrix not executed.
@@ -34,3 +36,4 @@
 2. If currency reporting required broadly, wire INR metadata to CLI outputs with `--currency-inr` and `--inr-rate` flags (configurable, USD canonical).
 3. Address any remaining artifact completeness items before freezing Stage 5B.
 4. Only proceed to Stage 5D implementation if explicitly requested.
+5. Continue Stage 5E E4-E9: artifact schema/provenance hardening, multi-solver coverage, scalability/memory qualification, numerical robustness, benchmark statistical power and documentation truth-up.

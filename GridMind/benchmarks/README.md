@@ -23,6 +23,8 @@ python -m benchmarks.qualification build-baseline `
 
 `benchmarks/runs/` is gitignored. Only the small `baseline.json` manifest and
 this documentation are committed; raw per-run CSVs/JSON remain local evidence.
+The captured reference environment, measured limits and gate evidence are
+recorded in `../STAGE5E_QUALIFICATION.md`.
 
 ## Gate a new run
 

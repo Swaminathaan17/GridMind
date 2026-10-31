@@ -44,6 +44,9 @@ jobs:
       - name: Verify solver discovery
         run: python -m gridmind check-solver
 
+      - name: Validate committed qualification baseline
+        run: python -m benchmarks.qualification validate-baseline --baseline benchmarks/baseline.json
+
       - name: Generate qualification manifest (smoke)
         run: >-
           python -m benchmarks.qualification measure
