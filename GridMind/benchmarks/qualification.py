@@ -153,10 +153,12 @@ def peak_rss_mb() -> float | None:
     """Peak resident set size of this process in MiB, where available."""
     try:
         if os.name == "nt":
-            class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
+            import ctypes.wintypes as wintypes
+
+            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
                 _fields_ = [
-                    ("cb", ctypes.c_ulong),
-                    ("PageFaultCount", ctypes.c_ulong),
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
                     ("PeakWorkingSetSize", ctypes.c_size_t),
                     ("WorkingSetSize", ctypes.c_size_t),
                     ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
@@ -165,14 +167,19 @@ def peak_rss_mb() -> float | None:
                     ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
                     ("PagefileUsage", ctypes.c_size_t),
                     ("PeakPagefileUsage", ctypes.c_size_t),
-                    ("PrivateUsage", ctypes.c_size_t),
                 ]
 
-            counters = PROCESS_MEMORY_COUNTERS_EX()
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            psapi.GetProcessMemoryInfo.argtypes = [
+                wintypes.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
+                wintypes.DWORD]
+            psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            counters = PROCESS_MEMORY_COUNTERS()
             counters.cb = ctypes.sizeof(counters)
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            ok = ctypes.windll.psapi.GetProcessMemoryInfo(
-                handle, ctypes.byref(counters), counters.cb)
+            ok = psapi.GetProcessMemoryInfo(
+                kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb)
             if not ok:
                 return None
             return round(counters.PeakWorkingSetSize / (1024 * 1024), 1)
@@ -949,6 +956,7 @@ def _cmd_measure(args: argparse.Namespace) -> int:
         print(f"  {name:<20} status={record['status']:<5} "
               f"median_wall={wall.get('median')}s deterministic={record['deterministic']}")
     ok = all(r["status"] == "ok" and r["deterministic"]
+             and isinstance(r.get("peak_rss_mb"), Mapping)
              for r in payload["workloads"].values())
     return 0 if ok else 1
 

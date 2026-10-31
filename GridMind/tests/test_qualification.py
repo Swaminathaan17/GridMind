@@ -83,6 +83,11 @@ def test_environment_manifest_has_required_provenance():
     assert "commit" in env["git"] and "dirty" in env["git"]
 
 
+def test_peak_rss_is_reported_when_supported():
+    value = q.peak_rss_mb()
+    assert value is None or value > 0
+
+
 def test_aggregate_marks_identical_hashes_deterministic():
     record = _aggregate()
     assert record["deterministic"] is True
