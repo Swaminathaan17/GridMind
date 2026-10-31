@@ -308,6 +308,74 @@ def validate_baseline_artifact(payload: Any) -> list[str]:
     return errors
 
 
+_PROBE_STATUSES = frozenset({"passed", "failed", "unavailable", "unsupported", "not_run"})
+
+
+def validate_coverage_artifact(payload: Any) -> list[str]:
+    errors: list[str] = []
+    record = _require_mapping(payload, "coverage", errors)
+    if record is None:
+        return errors
+    if record.get("kind") != COVERAGE_KIND:
+        errors.append(f"coverage.kind must be {COVERAGE_KIND!r}")
+    if record.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
+        errors.append(f"coverage.schema_version must be {ARTIFACT_SCHEMA_VERSION}")
+    if not is_timestamp(record.get("generated_at_utc")):
+        errors.append("coverage.generated_at_utc must be an ISO-8601 UTC timestamp ending in Z")
+    if not isinstance(record.get("environment"), Mapping):
+        errors.append("coverage.environment must be an object")
+    errors.extend(validate_provenance(record.get("provenance"), "coverage.provenance"))
+
+    solvers = _require_mapping(record.get("solvers"), "coverage.solvers", errors)
+    if solvers is not None:
+        if not solvers:
+            errors.append("coverage.solvers must not be empty")
+        for name, solver in solvers.items():
+            label = f"coverage.solvers[{name!r}]"
+            item = _require_mapping(solver, label, errors)
+            if item is None:
+                continue
+            if item.get("solver") != name:
+                errors.append(f"{label}.solver must match its key")
+            if not isinstance(item.get("available"), bool):
+                errors.append(f"{label}.available must be a boolean")
+            for formulation in ("lp", "mip"):
+                probe = _require_mapping(item.get(formulation), f"{label}.{formulation}", errors)
+                if probe is None:
+                    continue
+                status = probe.get("status")
+                if status not in _PROBE_STATUSES:
+                    errors.append(f"{label}.{formulation}.status must be one of "
+                                  f"{sorted(_PROBE_STATUSES)}")
+                if status == "passed":
+                    objective = probe.get("objective_usd")
+                    if not isinstance(objective, (int, float)) or isinstance(objective, bool) \
+                            or not math.isfinite(float(objective)):
+                        errors.append(f"{label}.{formulation}.objective_usd must be finite")
+                    if probe.get("validation_passed") is not True:
+                        errors.append(f"{label}.{formulation}.validation_passed must be true")
+                    if probe.get("solver") != name:
+                        errors.append(f"{label}.{formulation}.solver must match its key")
+
+    summary = _require_mapping(record.get("summary"), "coverage.summary", errors)
+    if summary is not None and not isinstance(summary.get("coverage_complete"), bool):
+        errors.append("coverage.summary.coverage_complete must be a boolean")
+    comparisons = record.get("comparisons")
+    if not isinstance(comparisons, list):
+        errors.append("coverage.comparisons must be a list")
+    else:
+        for index, comparison in enumerate(comparisons):
+            label = f"coverage.comparisons[{index}]"
+            item = _require_mapping(comparison, label, errors)
+            if item is None:
+                continue
+            if item.get("formulation") not in ("lp", "mip"):
+                errors.append(f"{label}.formulation must be 'lp' or 'mip'")
+            if not isinstance(item.get("equivalent"), bool):
+                errors.append(f"{label}.equivalent must be a boolean")
+    return errors
+
+
 def validate_hash_map(value: Any, label: str, *, allow_empty: bool = True) -> list[str]:
     errors: list[str] = []
     mapping = _require_mapping(value, label, errors)
