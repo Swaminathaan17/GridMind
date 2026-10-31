@@ -1,7 +1,7 @@
-# Stage 5D readiness report (readiness-only, no implementation)
+# Stage 5D operational-readiness report (implementation in progress)
 
 **Repo:** `C:\Users\DELL\Downloads\GridMind` / inner `GridMind`
-**Branch:** `main` @ `9f09a78` + local uncommitted Stage 5C integrity changes (not committed/pushed)
+**Branch:** `stage-5d-operational-readiness`, based on `6a9c7e5`
 **Environment:** Python 3.11.17, pyomo 6.10.1, highspy/appsi_highs MIP-capable
 **Tests:** 211 passed (full suite, verified 2026-10-30)
 
@@ -9,7 +9,7 @@
 - **Stage 5B:** Corrected and audited. Schema bumped to v3 with embedded realized demand/availability rows, problem hash, initial state. Executed trajectories independently validated; baseline re-dispatched at realized conditions. Fair comparison artifacts in `results/stage5b_audited/`. Historical `results/stage5b_control/` marked invalid and preserved unchanged.
 - **INR localization:** Traceable USD->INR conversion added (`gridmind/currency.py`) with explicit configurable rate, provenance (source/date/direction), Indian formatting, USD-preserving conversion tree, traceability table, and tests. Non-overwriting artifacts in `results/stage5b_inr_final/` (USD canonical, INR derived).
 - **Stage 5C:** Framework implemented and integrity-finalized (schema v2). Methods now store the exact executed trajectory; validation and comparison inclusion use that trace without re-solving. `solver_status` is separated from `policy_status`; solver-optimal but policy-infeasible executions are explicitly excluded. The benchmark covers six methods: deterministic open-loop, two committed full-horizon open-loop stochastic battery policies (risk-neutral/risk-aware), two causal receding-horizon stochastic hybrids (risk-neutral/risk-aware), and deterministic rolling-horizon. The open-loop stochastic policies commit the full-horizon battery schedule (matching the optimized terminal-SoC trajectory) and re-dispatch generation/flows/unmet at realized conditions; the hybrids re-plan causally from short windows, execute only current-period battery actions, and advertise `no_scenario_tree`. Historical v1 artifacts remain preserved.
-- **Stage 5D:** Readiness-only (this report). No implementation performed.
+- **Stage 5D:** Operational-readiness implementation in progress. CLI metadata refreshed; MIP probe cache now tracks executable identity, with regression tests for path and binary replacement.
 
 ## Evidence (key artifacts)
 - `results/stage5b_audited/audit_summary.json` (verdict: PASS WITH CORRECTIONS)
@@ -26,7 +26,7 @@
 - The stochastic hybrids are causal receding-horizon policies using the unchanged two-stage window model; they are not multistage scenario-tree optima and carry no global-optimality claim. The finite scenario sample also leaves Monte Carlo variance and foresight-model risk.
 - `_merit_order_recourse` fallback has limitations (local recourse, no network export in that path) - reported via logs/curtailment; remains explicit.
 - INR uses configurable default rate with provenance; no live FX feed.
-- No commit/push performed per constraints.
+- Stage 5D changes are maintained on the feature branch; do not merge to `main` until reviewed.
 - Historical schema-v2 smoke run `results/stage5c_batch2_smoke_20261030_103247/`: open-loop, both stochastic hybrids, and deterministic rolling-horizon passed independent validation; both old committed-first-stage baselines were excluded for terminal-SoC violations. That artifact is preserved unchanged. The Stage 5C finalization fixes the open-loop stochastic execution contract; historical benchmark artifacts remain preserved.
 
 ## Recommended next steps (if proceeding)

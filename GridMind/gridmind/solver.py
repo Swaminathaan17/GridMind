@@ -40,7 +40,7 @@ _FOLDER_EXECUTABLES = {"glpk": ("glpsol.exe", "glpsol"), "cbc": ("cbc.exe", "cbc
 _FILE_SOLVERS = frozenset({"glpk", "cbc"})
 
 #: private per-process cache of (ok, reason) empirical MIP probe outcomes
-_MIP_PROBE_CACHE: dict[str, tuple[bool, str]] = {}
+_MIP_PROBE_CACHE: dict[object, tuple[bool, str]] = {}
 
 class SolverUnavailableError(RuntimeError):
     """Pyomo missing, or the configured solver executable cannot be found."""
@@ -108,6 +108,46 @@ def _make(name: str) -> Any:
     return solver
 
 
+def _mip_probe_cache_key(name: str) -> object:
+    """Identify the solver implementation whose MIP capability was probed.
+
+    File-based solvers can be redirected with GRIDMIND_SOLVER_PATH or by
+    changing PATH while the process is running. Include the resolved
+    executable and its basic file identity so a cached result is never reused
+    for a different binary. Non-file plugins retain a simple name-based key.
+    """
+    if name not in _FILE_SOLVERS:
+        return name
+
+    configured_path = os.environ.get(ENV_SOLVER_PATH)
+    try:
+        if configured_path:
+            executable = _resolve_executable(configured_path, name)
+        else:
+            executable = None
+            for candidate in _FOLDER_EXECUTABLES[name]:
+                executable = shutil.which(candidate)
+                if executable:
+                    break
+    except SolverUnavailableError:
+        executable = None
+
+    if executable is None:
+        unresolved_path = (
+            os.path.normcase(os.path.abspath(configured_path))
+            if configured_path else None
+        )
+        return name, "unresolved", unresolved_path, os.environ.get("PATH", "")
+
+    resolved = os.path.normcase(os.path.realpath(executable))
+    try:
+        stat = os.stat(resolved)
+        return (name, resolved, stat.st_dev, stat.st_ino, stat.st_mode,
+                stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    except OSError:
+        return name, resolved, None, None
+
+
 def _probe_mip(name: str) -> tuple[bool, str]:
     """Empirically test whether solver ``name`` can solve a tiny binary model.
 
@@ -120,20 +160,21 @@ def _probe_mip(name: str) -> tuple[bool, str]:
     Outcomes are cached (successes and failures) in ``_MIP_PROBE_CACHE``.
     Returns ``(ok, reason)``; never raises.
     """
-    if name in _MIP_PROBE_CACHE:
-        return _MIP_PROBE_CACHE[name]
+    cache_key = _mip_probe_cache_key(name)
+    if cache_key in _MIP_PROBE_CACHE:
+        return _MIP_PROBE_CACHE[cache_key]
     try:
         import pyomo.environ as pyo
         from pyomo.opt import SolverStatus, TerminationCondition
     except ImportError as exc:
         result = (False, f"Pyomo is not installed: {exc}")
-        _MIP_PROBE_CACHE[name] = result
+        _MIP_PROBE_CACHE[cache_key] = result
         return result
     try:
         solver = _make(name)
     except SolverUnavailableError as exc:
         result = (False, str(exc))
-        _MIP_PROBE_CACHE[name] = result
+        _MIP_PROBE_CACHE[cache_key] = result
         return result
 
     try:
@@ -173,7 +214,7 @@ def _probe_mip(name: str) -> tuple[bool, str]:
         reason = f"{type(exc).__name__}: {exc}"
 
     result = (reason is None, reason or "ok: binary optimum -1 reached")
-    _MIP_PROBE_CACHE[name] = result
+    _MIP_PROBE_CACHE[cache_key] = result
     return result
 
 
