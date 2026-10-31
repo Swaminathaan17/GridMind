@@ -1,4 +1,4 @@
-﻿"""Command-line interface:  python -m gridmind <command> [options]"""
+"""Command-line interface:  python -m gridmind <command> [options]"""
 from __future__ import annotations
 
 import argparse
