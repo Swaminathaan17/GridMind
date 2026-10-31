@@ -17,6 +17,44 @@
     ]
   },
   "kind": "gridmind_qualification_baseline",
+  "provenance": {
+    "environment_sha256": "f994435da4f22adb64526d5b351cb366812bc0b8a129812f0be886a337ab9e0a",
+    "finished_at_utc": "2026-10-31T05:44:10Z",
+    "git": {
+      "branch": "stage-5d-operational-readiness",
+      "commit": "20eb70e786f048a8a6bdd5e2798314c920992020",
+      "dirty": false,
+      "root": "C:/Users/DELL/Downloads/GridMind-Stage5D"
+    },
+    "harness_version": "5E.4",
+    "input_hashes": {
+      "data/sample_horizon.json": "5d3d6db44f287bf062f7381444288ae03d1bc023f50e24aac6c6a2e603ad6f66",
+      "data/sample_network.json": "9be1c5aa032572197426d5aadd10743cb8e600efe8a6c64962eb961f38a820c3"
+    },
+    "legacy": true,
+    "schema_version": 1,
+    "solver_identity": [
+      {
+        "available": false,
+        "solver": "glpk",
+        "supports_mip": null,
+        "version": null
+      },
+      {
+        "available": false,
+        "solver": "cbc",
+        "supports_mip": null,
+        "version": null
+      },
+      {
+        "available": true,
+        "solver": "appsi_highs",
+        "supports_mip": true,
+        "version": "1.15.1"
+      }
+    ],
+    "started_at_utc": "2026-10-31T05:20:09Z"
+  },
   "reference_environment": {
     "captured_at_utc": "2026-10-31T05:20:09Z",
     "git": {
@@ -70,7 +108,8 @@
         "detail": "usable",
         "mip_detail": "ok: binary optimum -1 reached",
         "solver": "appsi_highs",
-        "supports_mip": true
+        "supports_mip": true,
+        "version": "1.15.1"
       }
     ]
   },
@@ -157,7 +196,14 @@
         ],
         "seed": 42
       },
+      "parameters_sha256": "4209c134f58aa02ae7a18d23699e917ab303526a3c8783ddc7687c90027b2f53",
       "solver": "appsi_highs",
+      "solver_identity": {
+        "available": true,
+        "solver": "appsi_highs",
+        "supports_mip": true,
+        "version": "1.15.1"
+      },
       "thresholds": {
         "peak_rss_mb_max": 139.4,
         "solver_seconds_max": 0.727,
@@ -210,7 +256,14 @@
         "mode": "deterministic",
         "seed": 20260201
       },
+      "parameters_sha256": "2f690d852a2364ef3517c00b5d54b6bf41adbc2c948e8b4bca52d783777bb54d",
       "solver": "appsi_highs",
+      "solver_identity": {
+        "available": true,
+        "solver": "appsi_highs",
+        "supports_mip": true,
+        "version": "1.15.1"
+      },
       "thresholds": {
         "peak_rss_mb_max": 150.0,
         "solver_seconds_max": 3.247,
@@ -272,7 +325,14 @@
           20260105
         ]
       },
+      "parameters_sha256": "0809e52613633bac1b54c75abd409416f0093a836b14e2bbb3691aa757acd376",
       "solver": "appsi_highs",
+      "solver_identity": {
+        "available": true,
+        "solver": "appsi_highs",
+        "supports_mip": true,
+        "version": "1.15.1"
+      },
       "thresholds": {
         "peak_rss_mb_max": 237.5,
         "solver_seconds_max": 742.008,
@@ -331,7 +391,14 @@
           43
         ]
       },
+      "parameters_sha256": "fc21f19e12c1617851296f1cfc3ddc24136fe8e7f8cedce88f2f5230b8943a63",
       "solver": "appsi_highs",
+      "solver_identity": {
+        "available": true,
+        "solver": "appsi_highs",
+        "supports_mip": true,
+        "version": "1.15.1"
+      },
       "thresholds": {
         "peak_rss_mb_max": 185.3,
         "solver_seconds_max": 136.686,
@@ -404,7 +471,14 @@
         ],
         "seed": 42
       },
+      "parameters_sha256": "8172084153de29c6dc44a50edea88e309715333106dfa77b431a4efa96d95764",
       "solver": "appsi_highs",
+      "solver_identity": {
+        "available": true,
+        "solver": "appsi_highs",
+        "supports_mip": true,
+        "version": "1.15.1"
+      },
       "thresholds": {
         "peak_rss_mb_max": 161.4,
         "solver_seconds_max": 7.387,
@@ -461,7 +535,14 @@
         ],
         "seed": 42
       },
+      "parameters_sha256": "0518b80dc701e703881d66c4ba6a28b1730bdd866ab09c41920c507815861b4a",
       "solver": "appsi_highs",
+      "solver_identity": {
+        "available": true,
+        "solver": "appsi_highs",
+        "supports_mip": true,
+        "version": "1.15.1"
+      },
       "thresholds": {
         "peak_rss_mb_max": 136.2,
         "solver_seconds_max": 0.06,
@@ -517,7 +598,14 @@
         "risk_weight": 0.5,
         "seed": 42
       },
+      "parameters_sha256": "4ef0ceb584412e923526a9b3221a834c7607e25c1305b3bc8409c625bb808f6e",
       "solver": "appsi_highs",
+      "solver_identity": {
+        "available": true,
+        "solver": "appsi_highs",
+        "supports_mip": true,
+        "version": "1.15.1"
+      },
       "thresholds": {
         "peak_rss_mb_max": 183.3,
         "solver_seconds_max": 21.406,
@@ -579,7 +667,14 @@
         "seed": 20260301,
         "workload": "stress_default"
       },
+      "parameters_sha256": "fab0aaceb9ba5f7dc27b1db2b66a367fc8341673abbc79b5495aace6a608c38e",
       "solver": "appsi_highs",
+      "solver_identity": {
+        "available": true,
+        "solver": "appsi_highs",
+        "supports_mip": true,
+        "version": "1.15.1"
+      },
       "thresholds": {
         "peak_rss_mb_max": 236.3,
         "solver_seconds_max": 23.786,

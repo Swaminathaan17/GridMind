@@ -36,13 +36,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-SCHEMA_VERSION = 1
-BASELINE_KIND = "gridmind_qualification_baseline"
-MEASUREMENT_KIND = "gridmind_qualification_measurements"
+from benchmarks import schema
+
+SCHEMA_VERSION = schema.ARTIFACT_SCHEMA_VERSION
+PROVENANCE_SCHEMA_VERSION = schema.PROVENANCE_SCHEMA_VERSION
+HARNESS_VERSION = schema.HARNESS_VERSION
+BASELINE_KIND = schema.BASELINE_KIND
+MEASUREMENT_KIND = schema.MEASUREMENT_KIND
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = ROOT.parent
 DEFAULT_BASELINE = ROOT / "benchmarks" / "baseline.json"
+
+#: input data files whose hashes are recorded with every evidence run
+INPUT_FILES = (
+    ROOT / "data" / "sample_network.json",
+    ROOT / "data" / "sample_horizon.json",
+)
 
 WALL_HEADROOM = 1.50
 SOLVER_HEADROOM = 1.50
@@ -191,13 +201,48 @@ def peak_rss_mb() -> float | None:
         return None
 
 
+def _solver_version(name: str) -> str | None:
+    """Best-effort version string for a solver plugin or executable."""
+    if name == "appsi_highs":
+        return _package_version("highspy")
+    try:
+        import shutil
+        executable = shutil.which("glpsol" if name == "glpk" else name)
+        if not executable:
+            return None
+        proc = subprocess.run([executable, "--version"], capture_output=True, text=True,
+                              timeout=5, check=False)
+        text = (proc.stdout or proc.stderr).strip().splitlines()
+        return text[0].strip() if text else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _solver_identity(name: str, inventory: Sequence[Mapping[str, Any]] | None = None
+                     ) -> dict[str, Any]:
+    row = next((r for r in (inventory or []) if r.get("solver") == name), {})
+    return {
+        "solver": name,
+        "version": row.get("version", _solver_version(name)),
+        "available": bool(row.get("available", True)),
+        "supports_mip": row.get("supports_mip"),
+    }
+
+
+def _input_hashes() -> dict[str, str]:
+    return {path.relative_to(ROOT).as_posix(): schema.sha256_file(path)
+            for path in INPUT_FILES if path.exists()}
+
+
 def _solver_inventory() -> tuple[list[dict[str, Any]], str | None]:
     try:
         from gridmind.solver import solver_inventory
         rows = solver_inventory()
         by_name = {row.get("solver"): row for row in rows}
-        ordered = [by_name[name] for name in SOLVER_ORDER if name in by_name]
-        ordered.extend(row for row in rows if row.get("solver") not in SOLVER_ORDER)
+        ordered = [dict(by_name[name]) for name in SOLVER_ORDER if name in by_name]
+        ordered.extend(dict(row) for row in rows if row.get("solver") not in SOLVER_ORDER)
+        for row in ordered:
+            row["version"] = _solver_version(str(row.get("solver")))
         return ordered, None
     except Exception as exc:  # pragma: no cover - defensive environment report
         return [], f"{type(exc).__name__}: {exc}"
@@ -234,6 +279,27 @@ def collect_environment() -> dict[str, Any]:
             "branch": _git("rev-parse", "--abbrev-ref", "HEAD"),
             "dirty": bool(_git("status", "--porcelain", "--untracked-files=no")),
         },
+    }
+
+
+def _provenance(environment: Mapping[str, Any], started_at_utc: str,
+                finished_at_utc: str, *, legacy: bool = False) -> dict[str, Any]:
+    """Provenance block shared by measurements and derived baselines."""
+    inventory = environment.get("solvers") or []
+    return {
+        "schema_version": PROVENANCE_SCHEMA_VERSION,
+        "harness_version": HARNESS_VERSION,
+        "legacy": legacy,
+        "started_at_utc": started_at_utc,
+        "finished_at_utc": finished_at_utc,
+        "git": dict(environment.get("git") or {}),
+        "environment_sha256": schema.canonical_sha256(environment),
+        "input_hashes": _input_hashes(),
+        "solver_identity": [
+            {"solver": row.get("solver"), "version": row.get("version"),
+             "available": bool(row.get("available")), "supports_mip": row.get("supports_mip")}
+            for row in inventory
+        ],
     }
 
 
@@ -585,18 +651,25 @@ def run_workload(name: str, out_dir: str | Path) -> dict[str, Any]:
         raise QualificationError(f"unknown workload {name!r}; choose from {sorted(WORKLOAD_SPECS)}")
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    inventory, _ = _solver_inventory()
+    started_at_utc = _utc_now()
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "kind": "gridmind_workload_result",
+        "kind": schema.WORKLOAD_KIND,
         "workload": name,
         "description": spec.description,
         "status": "error",
         "parameters": {},
         "solver": None,
+        "solver_identity": None,
         "solver_seconds": None,
         "wall_seconds": None,
         "peak_rss_mb": None,
         "decision_sha256": None,
+        "config_sha256": schema.canonical_sha256({}),
+        "input_hashes": _input_hashes(),
+        "started_at_utc": started_at_utc,
+        "finished_at_utc": None,
         "artifacts": {},
         "summary": {},
         "error": None,
@@ -612,20 +685,26 @@ def run_workload(name: str, out_dir: str | Path) -> dict[str, Any]:
         wall = time.perf_counter() - started
         artifacts = {}
         for path in sorted(p for p in out.rglob("*") if p.is_file()):
+            if path.name == "workload_result.json":
+                continue
             artifacts[path.relative_to(out).as_posix()] = sha256_file(path)
         result.update({
             "status": "ok",
             "parameters": dict(output.parameters),
             "solver": output.solver,
+            "solver_identity": _solver_identity(str(output.solver), inventory)
+            if output.solver else None,
             "solver_seconds": output.solver_seconds,
             "wall_seconds": round(wall, 6),
             "peak_rss_mb": peak_rss_mb(),
             "decision_sha256": sha256_canonical(output.decision_payload),
+            "config_sha256": schema.canonical_sha256(dict(output.parameters)),
             "artifacts": artifacts,
             "summary": dict(output.summary),
         })
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
+    result["finished_at_utc"] = _utc_now()
     _write_json(out / "workload_result.json", result)
     return result
 
@@ -648,12 +727,18 @@ def aggregate_repetitions(name: str, results: Sequence[Mapping[str, Any]]) -> di
     hashes = sorted({str(r.get("decision_sha256")) for r in ok if r.get("decision_sha256")})
     solvers = sorted({str(r.get("solver")) for r in ok if r.get("solver")})
     parameters = ok[0].get("parameters") if ok else {}
+    first = ok[0] if ok else {}
     return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "gridmind_workload_aggregate",
         "workload": name,
-        "description": ok[0].get("description") if ok else "",
+        "description": first.get("description") if ok else "",
         "status": "ok" if len(ok) == len(results) and results else "error",
         "parameters": parameters,
+        "config_sha256": first.get("config_sha256"),
+        "input_hashes": first.get("input_hashes") or _input_hashes(),
         "solver": solvers[0] if len(solvers) == 1 else (solvers or None),
+        "solver_identity": first.get("solver_identity"),
         "solvers": solvers,
         "deterministic": len(hashes) == 1,
         "decision_sha256": hashes[0] if len(hashes) == 1 else None,
@@ -662,8 +747,8 @@ def aggregate_repetitions(name: str, results: Sequence[Mapping[str, Any]]) -> di
         "wall_seconds": _stats(r.get("wall_seconds") for r in ok),
         "solver_seconds": _stats(r.get("solver_seconds") for r in ok),
         "peak_rss_mb": _stats(r.get("peak_rss_mb") for r in ok),
-        "summary": ok[0].get("summary") if ok else {},
-        "artifacts": ok[0].get("artifacts") if ok else {},
+        "summary": first.get("summary") if ok else {},
+        "artifacts": first.get("artifacts") if ok else {},
         "errors": [r.get("error") for r in results if r.get("status") != "ok"],
         "results": list(results),
     }
@@ -682,6 +767,7 @@ def measure(out_dir: str | Path, workload_names: Sequence[str] | None = None,
     if unknown:
         raise QualificationError(f"unknown workloads: {unknown}; choose from {sorted(WORKLOAD_SPECS)}")
     out.mkdir(parents=True)
+    started_at_utc = _utc_now()
     environment = collect_environment()
     workloads: dict[str, Any] = {}
     for name in names:
@@ -709,11 +795,13 @@ def measure(out_dir: str | Path, workload_names: Sequence[str] | None = None,
                     "returncode": proc.returncode,
                 })
         workloads[name] = aggregate_repetitions(name, reps)
+    finished_at_utc = _utc_now()
     payload = {
         "schema_version": SCHEMA_VERSION,
         "kind": MEASUREMENT_KIND,
-        "generated_at_utc": _utc_now(),
+        "generated_at_utc": finished_at_utc,
         "environment": environment,
+        "provenance": _provenance(environment, started_at_utc, finished_at_utc),
         "harness": {
             "repetitions": repetitions,
             "workloads": names,
@@ -735,20 +823,12 @@ def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
 
 
 def validate_measurement(payload: Mapping[str, Any]) -> list[str]:
-    errors: list[str] = []
-    if payload.get("kind") != MEASUREMENT_KIND:
-        errors.append(f"kind must be {MEASUREMENT_KIND!r}")
-    if payload.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"schema_version must be {SCHEMA_VERSION}")
-    if not isinstance(payload.get("environment"), Mapping):
-        errors.append("environment must be an object")
+    errors = schema.validate_measurement_artifact(payload)
     workloads = payload.get("workloads")
     if not isinstance(workloads, Mapping) or not workloads:
-        errors.append("workloads must be a non-empty object")
         return errors
     for name, record in workloads.items():
         if not isinstance(record, Mapping):
-            errors.append(f"workload {name}: must be an object")
             continue
         if record.get("status") != "ok":
             errors.append(f"workload {name}: status is {record.get('status')!r}")
@@ -761,36 +841,7 @@ def validate_measurement(payload: Mapping[str, Any]) -> list[str]:
 
 
 def validate_baseline(payload: Mapping[str, Any]) -> list[str]:
-    errors: list[str] = []
-    if payload.get("kind") != BASELINE_KIND:
-        errors.append(f"kind must be {BASELINE_KIND!r}")
-    if payload.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"schema_version must be {SCHEMA_VERSION}")
-    if not isinstance(payload.get("reference_environment"), Mapping):
-        errors.append("reference_environment must be an object")
-    if not isinstance(payload.get("threshold_policy"), Mapping):
-        errors.append("threshold_policy must be an object")
-    workloads = payload.get("workloads")
-    if not isinstance(workloads, Mapping) or not workloads:
-        errors.append("workloads must be a non-empty object")
-        return errors
-    for name, record in workloads.items():
-        if not isinstance(record, Mapping):
-            errors.append(f"workload {name}: must be an object")
-            continue
-        thresholds = record.get("thresholds")
-        if not isinstance(thresholds, Mapping):
-            errors.append(f"workload {name}: thresholds must be an object")
-        else:
-            for key, value in thresholds.items():
-                if not isinstance(value, (int, float)) or not math.isfinite(float(value)) or value <= 0:
-                    errors.append(f"workload {name}: threshold {key} must be finite and > 0")
-        digest = record.get("decision_sha256")
-        if not isinstance(digest, str) or len(digest) != 64:
-            errors.append(f"workload {name}: decision_sha256 must be 64 hex characters")
-        if not isinstance(record.get("measured"), Mapping):
-            errors.append(f"workload {name}: measured must be an object")
-    return errors
+    return schema.validate_baseline_artifact(payload)
 
 
 def _ceil(value: float, places: int = 3) -> float:
@@ -823,7 +874,9 @@ def build_baseline(measurement: Mapping[str, Any], out_path: str | Path) -> dict
         workloads[name] = {
             "description": record.get("description", ""),
             "parameters": record.get("parameters", {}),
+            "parameters_sha256": schema.canonical_sha256(record.get("parameters", {})),
             "solver": record.get("solver"),
+            "solver_identity": record.get("solver_identity"),
             "decision_sha256": record.get("decision_sha256"),
             "measured": {
                 "wall_seconds": wall,
@@ -838,6 +891,7 @@ def build_baseline(measurement: Mapping[str, Any], out_path: str | Path) -> dict
         "kind": BASELINE_KIND,
         "generated_at_utc": _utc_now(),
         "reference_environment": measurement["environment"],
+        "provenance": measurement.get("provenance"),
         "harness": measurement.get("harness", {}),
         "threshold_policy": {
             "wall_headroom_factor": WALL_HEADROOM,

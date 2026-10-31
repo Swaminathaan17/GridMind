@@ -12,6 +12,7 @@ needs_solver = pytest.mark.skipif(not SOLVER_OK, reason=f"solver unavailable: {S
 
 HASH_A = "a" * 64
 HASH_B = "b" * 64
+HASH_C = "c" * 64
 
 
 def _rep(*, wall=1.0, solver=0.1, rss=20.0, digest=HASH_A, status="ok",
@@ -24,13 +25,35 @@ def _rep(*, wall=1.0, solver=0.1, rss=20.0, digest=HASH_A, status="ok",
         "status": status,
         "parameters": {"seed": 42},
         "solver": solver_name,
+        "solver_identity": {"solver": solver_name, "version": "1.0", "available": True,
+                            "supports_mip": True},
         "solver_seconds": solver,
         "wall_seconds": wall,
         "peak_rss_mb": rss,
-        "decision_sha256": digest,
+        "decision_sha256": digest if status == "ok" else None,
+        "config_sha256": HASH_C,
+        "input_hashes": {"data/sample_network.json": HASH_C},
+        "started_at_utc": "2026-01-01T00:00:00Z",
+        "finished_at_utc": "2026-01-01T00:00:01Z",
         "artifacts": {},
         "summary": {},
         "error": None if status == "ok" else "boom",
+    }
+
+
+def _provenance():
+    return {
+        "schema_version": q.PROVENANCE_SCHEMA_VERSION,
+        "harness_version": q.HARNESS_VERSION,
+        "legacy": False,
+        "started_at_utc": "2026-01-01T00:00:00Z",
+        "finished_at_utc": "2026-01-01T00:00:01Z",
+        "git": {"commit": "d" * 40, "branch": "test", "dirty": False},
+        "environment_sha256": HASH_C,
+        "input_hashes": {"data/sample_network.json": HASH_C},
+        "solver_identity": [
+            {"solver": "appsi_highs", "version": "1.0", "available": True,
+             "supports_mip": True}],
     }
 
 
@@ -38,8 +61,9 @@ def _measurement(workloads):
     return {
         "schema_version": q.SCHEMA_VERSION,
         "kind": q.MEASUREMENT_KIND,
-        "generated_at_utc": "2026-01-01T00:00:00Z",
+        "generated_at_utc": "2026-01-01T00:00:01Z",
         "environment": {"python": {"version": "3.11.0"}},
+        "provenance": _provenance(),
         "harness": {"repetitions": 3},
         "workloads": workloads,
     }
@@ -203,6 +227,37 @@ def test_run_workload_reports_missing_solver(tmp_path, monkeypatch):
     assert result["status"] == "error"
     assert "solver unavailable" in result["error"]
     assert (tmp_path / "workload_result.json").exists()
+
+
+def test_measurement_without_provenance_is_rejected():
+    measurement = _measurement({"smoke": _aggregate()})
+    measurement.pop("provenance")
+    errors = q.validate_measurement(measurement)
+    assert any("provenance" in error for error in errors)
+
+
+def test_measurement_with_malformed_hashes_is_rejected():
+    measurement = _measurement({"smoke": _aggregate()})
+    measurement["provenance"]["input_hashes"]["data/sample_network.json"] = "not-a-hash"
+    measurement["workloads"]["smoke"]["results"][0]["config_sha256"] = "x"
+    errors = q.validate_measurement(measurement)
+    assert any("input_hashes" in error for error in errors)
+    assert any("config_sha256" in error for error in errors)
+
+
+def test_workload_result_requires_timestamps_and_solver_identity():
+    rep = _rep()
+    rep.pop("started_at_utc")
+    rep["solver_identity"] = None
+    errors = q.validate_measurement(_measurement({"smoke": _aggregate(reps=[rep])}))
+    assert any("started_at_utc" in error for error in errors)
+    assert any("solver_identity" in error for error in errors)
+
+
+def test_baseline_provenance_is_preserved_from_measurements(tmp_path):
+    baseline = _baseline(tmp_path, {"smoke": _aggregate()})
+    assert baseline["provenance"] == _provenance()
+    assert baseline["workloads"]["smoke"]["parameters_sha256"]
 
 
 @needs_solver
