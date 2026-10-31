@@ -53,10 +53,12 @@ has been approved.
 
 ## Threshold policy
 
-Thresholds are computed from the slowest of the committed baseline repetitions:
+Time limits use the median of the committed baseline repetitions so a single
+scheduler or I/O outlier cannot inflate the gate. Memory uses the observed
+maximum.
 
-- wall limit = `ceil(max observed wall x 1.50, 3 dp)`;
-- solver limit = `ceil(max observed solver x 1.50, 3 dp)`;
+- wall limit = `ceil(median observed wall x 1.50, 3 dp)`;
+- solver limit = `ceil(median observed solver x 1.50, 3 dp)`;
 - RSS limit = `ceil(max observed RSS x 1.25 + 16 MiB, 1 dp)`.
 
 The multipliers are fixed in the baseline file so every threshold can be

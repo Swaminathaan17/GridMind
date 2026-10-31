@@ -102,14 +102,14 @@ def test_aggregate_marks_hash_drift_nondeterministic():
     assert record["decision_sha256"] is None
 
 
-def test_baseline_thresholds_are_derived_from_measured_maxima(tmp_path):
+def test_baseline_thresholds_are_derived_from_measured_statistics(tmp_path):
     reps = [_rep(wall=2.0, solver=1.0, rss=10.0),
             _rep(wall=3.0, solver=2.0, rss=20.0),
             _rep(wall=4.0, solver=3.0, rss=30.0)]
     baseline = _baseline(tmp_path, {"smoke": _aggregate(reps=reps)})
     thresholds = baseline["workloads"]["smoke"]["thresholds"]
-    assert thresholds["wall_seconds_max"] == pytest.approx(6.0)
-    assert thresholds["solver_seconds_max"] == pytest.approx(4.5)
+    assert thresholds["wall_seconds_max"] == pytest.approx(4.5)
+    assert thresholds["solver_seconds_max"] == pytest.approx(3.0)
     assert thresholds["peak_rss_mb_max"] == pytest.approx(53.5)
     assert baseline["threshold_policy"]["wall_headroom_factor"] == q.WALL_HEADROOM
 

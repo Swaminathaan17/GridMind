@@ -814,11 +814,12 @@ def build_baseline(measurement: Mapping[str, Any], out_path: str | Path) -> dict
         if not isinstance(wall, Mapping) or not isinstance(rss, Mapping):
             raise QualificationError(f"workload {name}: missing wall/RSS statistics")
         thresholds = {
-            "wall_seconds_max": _ceil(float(wall["max"]) * WALL_HEADROOM),
+            "wall_seconds_max": _ceil(float(wall["median"]) * WALL_HEADROOM),
             "peak_rss_mb_max": _ceil(float(rss["max"]) * RSS_HEADROOM + RSS_FLOOR_MB, 1),
         }
         if isinstance(solver, Mapping):
-            thresholds["solver_seconds_max"] = _ceil(float(solver["max"]) * SOLVER_HEADROOM)
+            thresholds["solver_seconds_max"] = _ceil(
+                float(solver["median"]) * SOLVER_HEADROOM)
         workloads[name] = {
             "description": record.get("description", ""),
             "parameters": record.get("parameters", {}),
@@ -843,11 +844,13 @@ def build_baseline(measurement: Mapping[str, Any], out_path: str | Path) -> dict
             "solver_headroom_factor": SOLVER_HEADROOM,
             "rss_headroom_factor": RSS_HEADROOM,
             "rss_floor_mb": RSS_FLOOR_MB,
-            "formula": ("wall/solver limit = ceil(max observed x headroom, 3 dp); "
+            "formula": ("wall/solver limit = ceil(median observed x headroom, 3 dp); "
                         "RSS limit = ceil(max observed x headroom + floor, 1 dp)"),
-            "rationale": ("Limits are derived only from the slowest of the committed "
-                          "baseline repetitions. The headroom is fixed in this file so "
-                          "every threshold can be recomputed from the measured samples."),
+            "rationale": ("Time limits use the median of the committed baseline "
+                          "repetitions so a single scheduler or I/O outlier cannot inflate "
+                          "the gate; RSS uses the maximum observed value. The headroom is "
+                          "fixed in this file so every threshold can be recomputed from the "
+                          "measured samples."),
             "reference_machine_only": True,
         },
         "workloads": workloads,
