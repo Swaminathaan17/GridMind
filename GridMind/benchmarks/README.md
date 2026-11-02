@@ -53,6 +53,39 @@ Use `--workloads smoke` for a fast subset. Do not relax a limit to make a run
 pass; regenerate and review the baseline only when a deliberate workload change
 has been approved.
 
+On shared CI runners, use `--reproducibility-only` together with
+`--workloads smoke`. It still validates the artifacts, determinism, decision hash
+and solver identity, but skips the wall-time, solver-time and RSS thresholds,
+which are only meaningful on the reference machine. CI runs this gate against
+the committed baseline on every push and pull request.
+
+## Other Stage 5E evidence
+
+These commands use the same artifact schemas and provenance capture:
+
+```powershell
+python -m benchmarks.scalability run `
+  --out benchmarks/runs/scalability_<label>
+
+python -m benchmarks.solver_coverage run `
+  --out benchmarks/runs/solvers_<label>
+```
+
+`scalability` measures LP dispatch and multi-period MIP growth, peak RSS and a
+repeated-run leak probe. The committed summary is
+`STAGE5E_SCALABILITY_EVIDENCE.md`; the raw artifact stays under the gitignored
+`benchmarks/runs/` directory. `solver_coverage` probes every discovered solver;
+on this machine only `appsi_highs` is available, so GLPK/CBC parity is not
+claimed. The opt-in performance test runs with:
+
+```powershell
+$env:GRIDMIND_RUN_PERF = "1"
+python -m pytest -q tests/test_scalability.py
+```
+
+The full requirement matrix and local command evidence are in
+`../STAGE5E_AUDIT.md`. Stage 5E remains **in progress and not accepted**.
+
 ## Threshold policy
 
 Time limits use the median of the committed baseline repetitions so a single

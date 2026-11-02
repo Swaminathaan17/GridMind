@@ -14,6 +14,50 @@ def _run(size, wall, rss, *, status="ok", solver_status="optimal", validation=Tr
             "validation_passed": validation, "objective_usd": 1.0}
 
 
+def _worker_run(wall, rss, *, objective=1.0, solver="appsi_highs", status="ok"):
+    return {
+        "schema_version": sc.SCALABILITY_SCHEMA_VERSION,
+        "kind": "gridmind_scalability_worker",
+        "workload": "dispatch_lp",
+        "size": 10,
+        "status": status,
+        "error": None if status == "ok" else "boom",
+        "solver": solver,
+        "solver_status": "optimal" if status == "ok" else None,
+        "solver_seconds": wall / 2,
+        "solver_samples_seconds": [wall / 2],
+        "objective_usd": objective,
+        "validation_passed": status == "ok",
+        "wall_seconds": wall,
+        "wall_samples_seconds": [wall],
+        "rss_samples_mb": [rss],
+        "peak_rss_mb": rss,
+        "started_at_utc": "2026-01-01T00:00:00Z",
+        "finished_at_utc": "2026-01-01T00:00:01Z",
+    }
+
+
+def test_combine_replicates_uses_pooled_median_and_samples():
+    combined = sc.combine_replicate_runs(
+        "dispatch_lp", 10,
+        [_worker_run(1.0, 60.0), _worker_run(2.0, 61.0), _worker_run(3.0, 62.0)])
+    assert combined["repetitions"] == 3
+    assert combined["wall_seconds"] == pytest.approx(2.0)
+    assert combined["wall_samples_seconds"] == [1.0, 2.0, 3.0]
+    assert combined["objective_usd"] == pytest.approx(1.0)
+    assert combined["status"] == "ok"
+
+
+def test_combine_replicates_flags_objective_drift():
+    combined = sc.combine_replicate_runs(
+        "dispatch_lp", 10,
+        [_worker_run(1.0, 60.0), _worker_run(1.0, 60.0, objective=2.0)])
+    assert combined["status"] == "error"
+    assert combined["objective_usd"] is None
+    assert combined["objectives_usd"] == [1.0, 2.0]
+    assert "objective drift" in combined["error"]
+
+
 def test_growth_exponent_matches_power_law():
     assert sc.growth_exponent(10, 2.0, 100, 20.0) == pytest.approx(1.0)
     assert sc.growth_exponent(10, 2.0, 40, 4.0) == pytest.approx(0.5)

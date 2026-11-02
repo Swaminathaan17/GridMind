@@ -466,6 +466,233 @@ def validate_scalability_artifact(payload: Any) -> list[str]:
     return errors
 
 
+_STATISTICAL_CATEGORIES = frozenset(
+    {"functional", "statistical", "performance", "scalability"})
+
+
+def _validate_optional_interval(value: Any, label: str, errors: list[str]) -> None:
+    if value is None:
+        return
+    interval = _require_mapping(value, label, errors)
+    if interval is None:
+        return
+    for key in ("lower", "upper"):
+        if not _is_number(interval.get(key)):
+            errors.append(f"{label}.{key} must be finite")
+    if _is_number(interval.get("lower")) and _is_number(interval.get("upper")) \
+            and float(interval["lower"]) > float(interval["upper"]):
+        errors.append(f"{label}.lower must not exceed upper")
+    confidence = interval.get("nominal_confidence")
+    if not _is_number(confidence) or not 0 < float(confidence) < 1:
+        errors.append(f"{label}.nominal_confidence must be finite and between 0 and 1")
+    if not isinstance(interval.get("method"), str) or not interval.get("method"):
+        errors.append(f"{label}.method must be a non-empty string")
+
+
+def _validate_summary(value: Any, label: str, errors: list[str]) -> None:
+    summary = _require_mapping(value, label, errors)
+    if summary is None:
+        return
+    count = summary.get("count")
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        errors.append(f"{label}.count must be a positive integer")
+    for key in ("median", "min", "max", "q1", "q3", "iqr", "mad"):
+        if not _is_number(summary.get(key)):
+            errors.append(f"{label}.{key} must be finite")
+    samples = summary.get("samples")
+    if not isinstance(samples, list) or not samples or not all(_is_number(v) for v in samples):
+        errors.append(f"{label}.samples must be a non-empty list of finite numbers")
+    _validate_optional_interval(summary.get("median_interval"),
+                                f"{label}.median_interval", errors)
+
+
+def validate_statistical_artifact(payload: Any) -> list[str]:
+    errors: list[str] = []
+    record = _require_mapping(payload, "statistical", errors)
+    if record is None:
+        return errors
+    if record.get("kind") != STATISTICAL_KIND:
+        errors.append(f"statistical.kind must be {STATISTICAL_KIND!r}")
+    if record.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
+        errors.append(f"statistical.schema_version must be {ARTIFACT_SCHEMA_VERSION}")
+    if not is_timestamp(record.get("generated_at_utc")):
+        errors.append("statistical.generated_at_utc must be an ISO-8601 UTC timestamp ending in Z")
+    if not isinstance(record.get("environment"), Mapping):
+        errors.append("statistical.environment must be an object")
+    errors.extend(validate_provenance(record.get("provenance"), "statistical.provenance"))
+
+    methodology = _require_mapping(record.get("methodology"),
+                                   "statistical.methodology", errors)
+    if methodology is not None:
+        for key in ("batches", "repetitions_per_batch", "warmup_repetitions_per_batch",
+                    "measured_repetitions_per_workload", "scalability_batches",
+                    "scalability_repetitions_per_size"):
+            value = methodology.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                errors.append(f"statistical.methodology.{key} must be a non-negative integer")
+        for key in ("batches", "repetitions_per_batch", "scalability_batches",
+                    "scalability_repetitions_per_size"):
+            value = methodology.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value < 2:
+                errors.append(f"statistical.methodology.{key} must be at least 2")
+
+    acceptance = _require_mapping(record.get("acceptance"),
+                                  "statistical.acceptance", errors)
+    if acceptance is not None:
+        if not isinstance(acceptance.get("passed"), bool):
+            errors.append("statistical.acceptance.passed must be a boolean")
+        categories = _require_mapping(acceptance.get("categories"),
+                                      "statistical.acceptance.categories", errors)
+        if categories is not None:
+            if set(categories) != _STATISTICAL_CATEGORIES:
+                errors.append("statistical.acceptance.categories must contain exactly "
+                              f"{sorted(_STATISTICAL_CATEGORIES)}")
+            for key, value in categories.items():
+                if not isinstance(value, bool):
+                    errors.append(f"statistical.acceptance.categories.{key} must be a boolean")
+        _validate_checks(acceptance.get("checks"), "statistical.acceptance.checks", errors)
+
+    performance = _require_mapping(record.get("performance"),
+                                   "statistical.performance", errors)
+    if performance is not None:
+        batches = performance.get("batches")
+        if not isinstance(batches, list) or not batches:
+            errors.append("statistical.performance.batches must be a non-empty list")
+        workloads = _require_mapping(performance.get("workloads"),
+                                     "statistical.performance.workloads", errors)
+        if workloads is not None:
+            if not workloads:
+                errors.append("statistical.performance.workloads must not be empty")
+            for name, workload in workloads.items():
+                label = f"statistical.performance.workloads[{name!r}]"
+                item = _require_mapping(workload, label, errors)
+                if item is None:
+                    continue
+                total = item.get("repetitions_total")
+                if not isinstance(total, int) or isinstance(total, bool) or total < 1:
+                    errors.append(f"{label}.repetitions_total must be a positive integer")
+                warmups = item.get("warmup_repetitions_total")
+                if not isinstance(warmups, int) or isinstance(warmups, bool) or warmups < 0:
+                    errors.append(f"{label}.warmup_repetitions_total must be a non-negative integer")
+                samples = _require_mapping(item.get("samples"), f"{label}.samples", errors)
+                if samples is not None:
+                    for key in ("wall_seconds", "solver_seconds", "peak_rss_mb"):
+                        values = samples.get(key)
+                        if not isinstance(values, list) or not all(_is_number(v) for v in values):
+                            errors.append(f"{label}.samples.{key} must be a list of finite numbers")
+                    if not samples.get("wall_seconds"):
+                        errors.append(f"{label}.samples.wall_seconds must not be empty")
+                summary = _require_mapping(item.get("summary"), f"{label}.summary", errors)
+                if summary is not None:
+                    for key in ("wall_seconds", "solver_seconds", "peak_rss_mb"):
+                        if summary.get(key) is not None:
+                            _validate_summary(summary.get(key), f"{label}.summary.{key}", errors)
+                medians = item.get("batch_wall_medians")
+                if not isinstance(medians, list) or not medians \
+                        or not all(_is_number(v) for v in medians):
+                    errors.append(f"{label}.batch_wall_medians must be a non-empty "
+                                  "list of finite numbers")
+                hashes = item.get("decision_hashes")
+                if not isinstance(hashes, list) or not hashes \
+                        or not all(is_sha256(v) for v in hashes):
+                    errors.append(f"{label}.decision_hashes must be a non-empty list "
+                                  "of SHA-256 hashes")
+                solvers = item.get("solvers")
+                if not isinstance(solvers, list) or not solvers \
+                        or not all(isinstance(v, str) and v for v in solvers):
+                    errors.append(f"{label}.solvers must be a non-empty list of names")
+                _require_mapping(item.get("baseline_limits"),
+                                 f"{label}.baseline_limits", errors)
+
+    scalability = _require_mapping(record.get("scalability"),
+                                   "statistical.scalability", errors)
+    if scalability is not None:
+        batches = scalability.get("batches")
+        if not isinstance(batches, list) or not batches:
+            errors.append("statistical.scalability.batches must be a non-empty list")
+        thresholds = _require_mapping(scalability.get("thresholds"),
+                                      "statistical.scalability.thresholds", errors)
+        if thresholds is not None:
+            for key in ("max_time_exponent", "max_rss_growth_mb", "max_rss_growth_factor",
+                        "leak_tolerance_mb", "leak_tolerance_fraction"):
+                if not _is_number(thresholds.get(key)) or float(thresholds[key]) <= 0:
+                    errors.append(f"statistical.scalability.thresholds.{key} "
+                                  "must be finite and > 0")
+        if not isinstance(scalability.get("thresholds_consistent"), bool):
+            errors.append("statistical.scalability.thresholds_consistent must be a boolean")
+        families = _require_mapping(scalability.get("families"),
+                                    "statistical.scalability.families", errors)
+        if families is not None:
+            if not families:
+                errors.append("statistical.scalability.families must not be empty")
+            for kind, family in families.items():
+                label = f"statistical.scalability.families[{kind!r}]"
+                item = _require_mapping(family, label, errors)
+                if item is None:
+                    continue
+                sizes = item.get("sizes")
+                if not isinstance(sizes, list) or len(sizes) < 2 \
+                        or not all(isinstance(v, int) and not isinstance(v, bool) for v in sizes):
+                    errors.append(f"{label}.sizes must contain at least two integers")
+                per_size = _require_mapping(item.get("per_size"), f"{label}.per_size", errors)
+                if per_size is not None:
+                    for size, values in per_size.items():
+                        _require_mapping(values, f"{label}.per_size[{size!r}]", errors)
+                growth = _require_mapping(item.get("growth"), f"{label}.growth", errors)
+                if growth is not None:
+                    exponent = growth.get("time_exponent")
+                    if exponent is not None and not _is_number(exponent):
+                        errors.append(f"{label}.growth.time_exponent must be finite or null")
+                    _validate_optional_interval(
+                        growth.get("time_exponent_bootstrap_interval"),
+                        f"{label}.growth.time_exponent_bootstrap_interval", errors)
+                    for key in ("rss_growth_mb", "rss_growth_factor"):
+                        if not _is_number(growth.get(key)):
+                            errors.append(f"{label}.growth.{key} must be finite")
+                replicates = _require_mapping(item.get("replicates_per_size"),
+                                              f"{label}.replicates_per_size", errors)
+                if replicates is not None:
+                    for size, count in replicates.items():
+                        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                            errors.append(f"{label}.replicates_per_size[{size!r}] "
+                                          "must be a positive integer")
+        leak = _require_mapping(scalability.get("leak"),
+                                "statistical.scalability.leak", errors)
+        if leak is not None:
+            if not isinstance(leak.get("leak_suspected"), bool):
+                errors.append("statistical.scalability.leak.leak_suspected must be a boolean")
+            growths = leak.get("rss_growth_mb")
+            if not isinstance(growths, list) or not growths \
+                    or not all(_is_number(v) for v in growths):
+                errors.append("statistical.scalability.leak.rss_growth_mb must be a "
+                              "non-empty list of finite numbers")
+            if not isinstance(leak.get("batch_values"), list) or not leak.get("batch_values"):
+                errors.append("statistical.scalability.leak.batch_values must be a non-empty list")
+        _validate_checks(scalability.get("checks"),
+                         "statistical.scalability.checks", errors)
+    return errors
+
+
+def _validate_checks(value: Any, label: str, errors: list[str]) -> None:
+    if not isinstance(value, list) or not value:
+        errors.append(f"{label} must be a non-empty list")
+        return
+    for index, check in enumerate(value):
+        item = _require_mapping(check, f"{label}[{index}]", errors)
+        if item is None:
+            continue
+        category = item.get("category")
+        if category not in _STATISTICAL_CATEGORIES:
+            errors.append(f"{label}[{index}].category must be one of "
+                          f"{sorted(_STATISTICAL_CATEGORIES)}")
+        if not isinstance(item.get("name"), str) or not item.get("name"):
+            errors.append(f"{label}[{index}].name must be a non-empty string")
+        if not isinstance(item.get("passed"), bool):
+            errors.append(f"{label}[{index}].passed must be a boolean")
+        if not isinstance(item.get("detail"), str):
+            errors.append(f"{label}[{index}].detail must be a string")
+
+
 def validate_hash_map(value: Any, label: str, *, allow_empty: bool = True) -> list[str]:
     errors: list[str] = []
     mapping = _require_mapping(value, label, errors)

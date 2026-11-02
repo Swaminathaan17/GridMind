@@ -126,6 +126,25 @@ def test_aggregate_marks_hash_drift_nondeterministic():
     assert record["decision_sha256"] is None
 
 
+def test_aggregate_reports_dispersion_and_retains_outliers():
+    reps = [_rep(wall=1.0), _rep(wall=1.05), _rep(wall=0.95), _rep(wall=100.0)]
+    record = q.aggregate_repetitions("smoke", reps)
+    assert record["wall_seconds"]["count"] == 4
+    assert record["wall_seconds"]["median"] == pytest.approx(1.025)
+    assert record["wall_seconds"]["outliers"]["count"] == 1
+    assert len(record["wall_seconds"]["samples"]) == 4
+
+
+def test_aggregate_excludes_warmups_from_statistics():
+    reps = [_rep(wall=1.0), _rep(wall=1.1)]
+    warmups = [_rep(wall=50.0)]
+    record = q.aggregate_repetitions("smoke", reps, warmups)
+    assert record["repetitions"] == 2
+    assert record["warmup_repetitions"] == 1
+    assert record["wall_seconds"]["median"] == pytest.approx(1.05)
+    assert record["wall_seconds"]["samples"] == [1.0, 1.1]
+
+
 def test_baseline_thresholds_are_derived_from_measured_statistics(tmp_path):
     reps = [_rep(wall=2.0, solver=1.0, rss=10.0),
             _rep(wall=3.0, solver=2.0, rss=20.0),
@@ -179,6 +198,37 @@ def test_gate_fails_on_decision_hash_drift(tmp_path):
     assert any(f["metric"] == "decision_sha256" for f in result["failures"])
 
 
+def test_reproducibility_gate_skips_machine_specific_performance(tmp_path):
+    baseline = _baseline(tmp_path, {"smoke": _aggregate()})
+    measured = _measurement({"smoke": _aggregate(
+        reps=[_rep(wall=500.0, solver=500.0, rss=9999.0) for _ in range(3)])})
+    result = q.evaluate_gate(measured, baseline, require_performance=False)
+    assert result["passed"] is True
+    assert all(check["kind"] != "performance" for check in result["checks"])
+
+
+def test_reproducibility_gate_still_rejects_decision_hash_drift(tmp_path):
+    baseline = _baseline(tmp_path, {"smoke": _aggregate()})
+    measured = _measurement({"smoke": _aggregate(
+        reps=[_rep(digest=HASH_B), _rep(digest=HASH_B), _rep(digest=HASH_B)])})
+    result = q.evaluate_gate(measured, baseline, require_performance=False)
+    assert result["passed"] is False
+    assert any(f["metric"] == "decision_sha256" for f in result["failures"])
+
+
+def test_gate_cli_reproducibility_only_accepts_slow_but_identical_run(tmp_path, capsys):
+    baseline_path = tmp_path / "baseline.json"
+    q.build_baseline(_measurement({"smoke": _aggregate()}), baseline_path)
+    measurement = _measurement({"smoke": _aggregate(
+        reps=[_rep(wall=500.0, solver=500.0, rss=9999.0) for _ in range(3)])})
+    measurement_path = tmp_path / "measurements.json"
+    measurement_path.write_text(json.dumps(measurement), encoding="utf-8")
+    exit_code = q.main(["gate", "--measurements", str(measurement_path),
+                        "--baseline", str(baseline_path), "--reproducibility-only"])
+    assert exit_code == 0
+    assert "PASS" in capsys.readouterr().out
+
+
 def test_gate_fails_when_baseline_workload_is_missing(tmp_path):
     baseline = _baseline(tmp_path, {
         "smoke": _aggregate(),
@@ -207,6 +257,11 @@ def test_measure_refuses_existing_directory(tmp_path):
 def test_measure_rejects_invalid_repetitions(tmp_path):
     with pytest.raises(q.QualificationError, match="repetitions"):
         q.measure(tmp_path / "run", ["smoke"], repetitions=0)
+
+
+def test_measure_rejects_negative_warmups(tmp_path):
+    with pytest.raises(q.QualificationError, match="warmup"):
+        q.measure(tmp_path / "run", ["smoke"], repetitions=1, warmup_repetitions=-1)
 
 
 def test_measure_rejects_unknown_workload(tmp_path):

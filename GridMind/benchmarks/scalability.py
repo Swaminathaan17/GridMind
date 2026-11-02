@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from benchmarks import schema
+from benchmarks import schema, stats as robust_stats
 from benchmarks.qualification import (
     ROOT,
     QualificationError,
@@ -153,8 +153,8 @@ def run_worker(kind: str, size: int, repetitions: int = 1) -> dict[str, Any]:
 
 
 def _run_child(kind: str, size: int, repetitions: int, out_dir: Path,
-               timeout_seconds: float) -> dict[str, Any]:
-    probe_dir = out_dir / f"{kind}-{size}"
+               timeout_seconds: float, probe_name: str | None = None) -> dict[str, Any]:
+    probe_dir = out_dir / (probe_name or f"{kind}-{size}")
     probe_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.pop("GRIDMIND_SOLVER_PATH", None)
@@ -173,6 +173,59 @@ def _run_child(kind: str, size: int, repetitions: int, out_dir: Path,
     return {"status": "error", "workload": kind, "size": size,
             "error": (proc.stderr.strip() or proc.stdout.strip()
                       or f"worker exited with {proc.returncode}")}
+
+
+def combine_replicate_runs(kind: str, size: int,
+                           replicates: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Combine independent child runs into one size-level record."""
+    if len(replicates) == 1:
+        return dict(replicates[0])
+    ok = [run for run in replicates if run.get("status") == "ok"]
+    wall = [value for run in ok for value in (run.get("wall_samples_seconds")
+                                              or [run.get("wall_seconds")])]
+    solver = [value for run in ok for value in (run.get("solver_samples_seconds")
+                                                or [run.get("solver_seconds")])]
+    rss = [value for run in ok for value in (run.get("rss_samples_mb")
+                                             or [run.get("peak_rss_mb")])]
+    objectives = sorted({round(float(run["objective_usd"]), 6) for run in ok
+                         if _finite(run.get("objective_usd"))})
+    solvers = sorted({str(run.get("solver")) for run in ok if run.get("solver")})
+    wall_stats = robust_stats.summarize(wall)
+    solver_stats = robust_stats.summarize(solver)
+    rss_stats = robust_stats.summarize(rss)
+    all_ok = len(ok) == len(replicates) and len(objectives) == 1 and len(solvers) == 1
+    errors = [str(run.get("error")) for run in replicates if run.get("status") != "ok"]
+    if len(objectives) > 1:
+        errors.append(f"objective drift across replicates: {objectives}")
+    if len(solvers) > 1:
+        errors.append(f"solver drift across replicates: {solvers}")
+    return {
+        "schema_version": SCALABILITY_SCHEMA_VERSION,
+        "kind": "gridmind_scalability_worker",
+        "workload": kind,
+        "size": int(size),
+        "repetitions": len(replicates),
+        "status": "ok" if all_ok else "error",
+        "started_at_utc": replicates[0].get("started_at_utc"),
+        "finished_at_utc": replicates[-1].get("finished_at_utc"),
+        "solver": solvers[0] if len(solvers) == 1 else None,
+        "solver_status": "optimal" if ok and all(
+            run.get("solver_status") == "optimal" for run in ok) else None,
+        "solver_seconds": solver_stats["median"] if solver_stats else None,
+        "solver_samples_seconds": solver,
+        "solver_stats": solver_stats,
+        "objective_usd": objectives[0] if len(objectives) == 1 else None,
+        "objectives_usd": objectives,
+        "validation_passed": bool(ok) and all(run.get("validation_passed") is True for run in ok),
+        "wall_seconds": wall_stats["median"] if wall_stats else None,
+        "wall_samples_seconds": wall,
+        "wall_stats": wall_stats,
+        "rss_samples_mb": rss,
+        "rss_stats": rss_stats,
+        "peak_rss_mb": rss_stats["max"] if rss_stats else None,
+        "error": "; ".join(errors) if errors else None,
+        "replicates": list(replicates),
+    }
 
 
 def _finite(value: Any) -> bool:
@@ -260,6 +313,7 @@ def run_scalability(out_dir: str | Path, *,
                     leak_repetitions: int = DEFAULT_LEAK_REPETITIONS,
                     leak_size: int | None = None,
                     timeout_seconds: float = 900.0,
+                    repetitions: int = 1,
                     max_exponent: float = DEFAULT_MAX_EXPONENT,
                     max_rss_growth_mb: float = DEFAULT_MAX_RSS_GROWTH_MB,
                     max_rss_growth_factor: float = DEFAULT_MAX_RSS_GROWTH_FACTOR,
@@ -273,6 +327,8 @@ def run_scalability(out_dir: str | Path, *,
         raise QualificationError("both LP and MIP size lists must be non-empty")
     if leak_repetitions < 2:
         raise QualificationError("leak_repetitions must be at least 2")
+    if repetitions < 1:
+        raise QualificationError("repetitions must be at least 1")
     out.mkdir(parents=True)
     started_at_utc = _utc_now()
     environment = collect_environment()
@@ -281,8 +337,13 @@ def run_scalability(out_dir: str | Path, *,
     for kind, sizes in (("dispatch_lp", lp_sizes), ("schedule_mip", mip_sizes)):
         runs = []
         for size in sizes:
-            result = _run_child(kind, int(size), 1, out, timeout_seconds)
-            runs.append(result)
+            replicates = []
+            for index in range(1, repetitions + 1):
+                probe_name = (f"{kind}-{size}" if repetitions == 1
+                              else f"{kind}-{size}-rep-{index:02d}")
+                replicates.append(_run_child(kind, int(size), 1, out, timeout_seconds,
+                                             probe_name=probe_name))
+            runs.append(combine_replicate_runs(kind, int(size), replicates))
         growth = assess_growth(runs, max_exponent=max_exponent,
                                max_rss_growth_mb=max_rss_growth_mb,
                                max_rss_growth_factor=max_rss_growth_factor)
@@ -326,6 +387,12 @@ def run_scalability(out_dir: str | Path, *,
             "leak_tolerance_mb": leak_tolerance_mb,
             "leak_tolerance_fraction": leak_tolerance_fraction,
         },
+        "harness": {
+            "repetitions_per_size": repetitions,
+            "leak_repetitions": leak_repetitions,
+            "timeout_seconds": timeout_seconds,
+            "command": "python -m benchmarks.scalability",
+        },
         "families": families,
         "leak": leak,
         "checks": all_checks,
@@ -344,7 +411,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         args.out,
         lp_sizes=args.lp_sizes, mip_sizes=args.mip_sizes,
         leak_repetitions=args.leak_repetitions, leak_size=args.leak_size,
-        timeout_seconds=args.timeout, max_exponent=args.max_exponent,
+        timeout_seconds=args.timeout, repetitions=args.repetitions,
+        max_exponent=args.max_exponent,
         max_rss_growth_mb=args.max_rss_growth_mb,
         max_rss_growth_factor=args.max_rss_growth_factor,
         leak_tolerance_mb=args.leak_tolerance_mb,
@@ -385,6 +453,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--leak-repetitions", type=int, default=DEFAULT_LEAK_REPETITIONS)
     run_parser.add_argument("--leak-size", type=int)
     run_parser.add_argument("--timeout", type=float, default=900.0)
+    run_parser.add_argument("--repetitions", type=int, default=1,
+                            help="independent child runs per size")
     run_parser.add_argument("--max-exponent", type=float, default=DEFAULT_MAX_EXPONENT)
     run_parser.add_argument("--max-rss-growth-mb", type=float, default=DEFAULT_MAX_RSS_GROWTH_MB)
     run_parser.add_argument("--max-rss-growth-factor", type=float,

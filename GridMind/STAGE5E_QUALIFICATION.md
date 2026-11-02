@@ -1,12 +1,19 @@
-# Stage 5E qualification baseline (P0 complete)
+# Stage 5E qualification status (in progress, not accepted)
 
-**Branch:** `stage-5d-operational-readiness`
+**Branch:** `stage-5e-work-in-progress`
+**Audit HEAD:** `683cf6b2727cf1953b6ea2c5441ab97093d2aa23` (documentation changes are uncommitted)
 **Baseline commit:** `20eb70e786f048a8a6bdd5e2798314c920992020`
-**Captured:** 2026-10-31T05:20:09Z
-**Tests:** 233 passed (full suite, 245.57 s)
-**Status:** P0 E1-E3 complete. This is not a claim that the full Stage 5E plan is complete.
+**Baseline captured:** 2026-10-31T05:20:09Z
+**Tests:** 258 passed, 1 intentionally skipped (full suite, verified 2026-11-01)
+**Status:** Stage 5E is **in progress and not accepted**. P0 (E1-E3) is complete; E4, E7 and the
+documentation part of E8 are verified locally; E5 is blocked by missing GLPK/CBC; E6 is
+**partially verified** with local-only evidence; remote CI has not been observed; E9 benchmark
+statistical power remains open.
 
-## Scope
+**Stage status:** Stage 5D is the last officially accepted stage. Nothing in this report accepts
+Stage 5E or turns local timing evidence into a portability claim.
+
+## Baseline scope (P0)
 
 P0 establishes the minimum reproducible qualification foundation:
 
@@ -16,6 +23,20 @@ P0 establishes the minimum reproducible qualification foundation:
 
 No optimisation model, solver default, dispatch rule or public CLI contract was
 changed. Strict timing and memory limits are for the reference machine only.
+
+## Current Stage 5E evidence status
+
+| Area | Status on 2026-11-01 | Evidence / limitation |
+|---|---|---|
+| Packaging and pins | Verified locally | `pyproject.toml`, `requirements-lock.txt`, constrained `requirements.txt`; the lock installs and the suite passes. |
+| Full test suite | Verified locally | 259 collected: 258 passed, 1 intentionally skipped (`GRIDMIND_RUN_PERF != 1`). |
+| CI workflow | Verified locally, remote pending | Windows/Linux jobs run the suite, solver discovery, baseline validation and a smoke reproducibility gate. No remote run was observed from this workstation. |
+| Qualification and performance gate | Verified locally | Committed baseline validates (`VALID`); historical baseline self-check was `PASS (48 checks, 0 failures)` at capture time; current independent smoke gate `PASS (6 checks, 0 failures)`; reproducibility-only smoke gate `PASS (3 checks, 0 failures)`. The old raw baseline measurement does not validate under the hardened schema. |
+| Artifact schema and provenance | Verified locally | `benchmarks/schema.py` validates measurements, baselines, coverage and scalability artifacts; malformed hashes, missing provenance and invalid solver identity are rejected by tests. The baseline is explicitly `legacy: true`. |
+| Multi-solver coverage | **Blocked** | `appsi_highs` passes LP and MIP coverage (`coverage_complete=true`, LP objective 20,300, MIP objective 400). `glpk` and `cbc` are unavailable, so parity is **not verified**. |
+| Scalability and peak memory | **Partially verified, local-only** | Local artifact has 13 checks and 0 failures; see `benchmarks/STAGE5E_SCALABILITY_EVIDENCE.md`. The artifact is under gitignored `benchmarks/runs/`, uses one repetition per size and is not a production-scale or portability claim. |
+| Numerical robustness | Verified locally | `tests/test_numerical_robustness.py` covers tolerance boundaries, scale extremes, ill-conditioned costs, zero demand, strict infeasibility, determinism and near-zero battery MIP. |
+| Documentation and reproducibility | Completed locally | This report, `benchmarks/README.md`, `README.md`, `STAGE5D_READINESS.md`, `STAGE5E_AUDIT.md` and the scalability evidence report now match the measured state. |
 
 ## Reference environment
 
@@ -71,14 +92,61 @@ repetitions.
 
 ## Gate evidence
 
-- Baseline self-check: `PASS (48 checks, 0 failures)`.
-- Independent fresh smoke gate:
-  `PASS (6 checks, 0 failures)`, with the committed `smoke` decision hash.
-- Full suite: `233 passed in 245.57 s`.
+Historical baseline evidence captured on 2026-10-31:
 
-The gate checks decision-hash equality, deterministic repetitions, solver name,
-median wall time, median solver time and maximum peak RSS. Timing fields are
-removed and floats are rounded to six decimals before hashing.
+- Baseline self-check at capture time: `PASS (48 checks, 0 failures)`.
+- Independent fresh smoke gate: `PASS (6 checks, 0 failures)` with the committed
+  `smoke` decision hash.
+- Full suite at baseline: `233 passed in 245.57 s`.
+
+The retained raw baseline measurement file predates schema hardening. It no longer
+validates under the current schema, so the 48-check self-check is a historical
+record, not a currently reproducible command. The committed `baseline.json`
+itself is valid under the current schema and remains the gate input.
+
+Current local evidence on 2026-11-01:
+
+```text
+python -m benchmarks.qualification validate-baseline --baseline benchmarks/baseline.json
+VALID
+
+python -m benchmarks.qualification measure --out benchmarks/runs/audit_smoke_20261101 --workloads smoke --repetitions 2
+smoke status=ok median_wall=0.034009s deterministic=True
+
+python -m benchmarks.qualification gate --measurements benchmarks/runs/audit_smoke_20261101/measurements.json --baseline benchmarks/baseline.json --workloads smoke
+PASS (6 checks, 0 failures)
+
+python -m benchmarks.qualification gate --measurements benchmarks/runs/audit_smoke_20261101/measurements.json --baseline benchmarks/baseline.json --workloads smoke --reproducibility-only
+PASS (3 checks, 0 failures)
+
+python -m pytest -q
+258 passed, 1 skipped
+```
+
+The strict gate checks decision-hash equality, deterministic repetitions, solver
+name, median wall time, median solver time and maximum peak RSS. Timing fields
+are removed and floats are rounded to six decimals before hashing.
+`--reproducibility-only` keeps schema validation, determinism, decision-hash
+equality and solver identity, but intentionally omits the machine-specific
+wall, solver-time and RSS thresholds used by CI.
+
+The local CI-equivalent smoke gate is:
+
+```powershell
+python -m benchmarks.qualification measure `
+  --out benchmarks/runs/local_ci_smoke_<label> `
+  --workloads smoke `
+  --repetitions 2
+
+python -m benchmarks.qualification gate `
+  --measurements benchmarks/runs/local_ci_smoke_<label>/measurements.json `
+  --baseline benchmarks/baseline.json `
+  --workloads smoke `
+  --reproducibility-only
+```
+
+This proves the workflow logic locally. It is not evidence that the remote
+Windows/Linux workflow jobs have passed.
 
 ## Threshold policy
 
@@ -96,12 +164,22 @@ change.
 - The baseline was captured on a developer workstation with other applications
   running. It is conservative and must be recalibrated on an idle reference
   machine before being used as a release blocker.
-- CI (`.github/workflows/ci.yml`) validates the baseline structure and generates
-  a smoke manifest on Windows and Linux. It does not enforce timing/RSS gates on
-  shared runners because those limits are machine-specific.
+- The raw baseline measurement artifact predates schema hardening and is legacy.
+  `baseline.json` validates and drives current gates, but the original 48-check
+  self-check cannot be rerun from that raw artifact without migration. The current
+  reproducible evidence uses a fresh smoke measurement.
+- CI (`.github/workflows/ci.yml`) validates the baseline structure, generates a
+  smoke manifest on Windows and Linux, and gates that manifest against the
+  committed smoke decision hash, determinism and solver identity with
+  `--reproducibility-only`. It does not enforce timing/RSS gates on shared
+  runners because those limits are machine-specific. **Remote CI execution is
+  still pending.**
 - Only `appsi_highs` was exercised. GLPK/CBC parity and multi-solver coverage
-  remain Stage 5E E5 work.
-- The workloads use the synthetic sample network and horizon; they are not a
-  production-scale capacity test (Stage 5E E6).
-- Artifact schema/provenance hardening, numerical robustness, benchmark
-  statistical power and full documentation truth-up remain E4 and E7-E9.
+  remain **blocked** until those executables are supplied and coverage is rerun.
+- Local scalability evidence passes its guardrails, but it covers synthetic
+  problems, one repetition per size and a dirty worktree at commit
+  `6a7e520`; it is not a production-scale capacity claim or a portability claim.
+  See `benchmarks/STAGE5E_SCALABILITY_EVIDENCE.md`.
+- Artifact schema/provenance hardening, numerical robustness and documentation
+  truth-up are complete locally. Benchmark statistical power (E9) and remote CI
+  confirmation remain open, so **Stage 5E is not accepted**.

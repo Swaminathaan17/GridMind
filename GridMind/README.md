@@ -1,11 +1,16 @@
 # GridMind - least-cost dispatch optimisation (research prototype)
 
-GridMind is a **backend-only** linear-programming engine (Python 3.11, Pyomo, GLPK) that finds the
-least-cost generation and transmission schedule for a **simulated** 8-node network.
+GridMind is a **backend-only** linear-programming engine (Python 3.11, Pyomo, and HiGHS via
+`highspy`) that finds the least-cost generation and transmission schedule for a **simulated**
+8-node network. GLPK and CBC are optional external solvers, not required for the default setup.
 
 > **Scope disclaimer.** GridMind is a research / decision-support prototype working on a synthetic
 > network. It does not predict, forecast or control any real electricity grid, and its numbers must
 > not be used for real operational, market or safety decisions.
+
+**Stage status:** Stage 5D is the last officially accepted stage. Stage 5E is in progress and is
+**not accepted**; its current evidence, limitations and remaining blockers are recorded in
+`STAGE5E_QUALIFICATION.md` and `STAGE5E_AUDIT.md`.
 
 ## Mathematical formulation
 
@@ -249,16 +254,22 @@ gas-east 80, gas-south 40 MW (so the ramp-from-initial constraints bind). Load
 cd C:\Users\DELL\Downloads\GridMind\GridMind
 py -3.11 -m venv ..\.venv            # venv sits next to the project folder
 ..\.venv\Scripts\Activate.ps1        # if blocked: Set-ExecutionPolicy -Scope Process Bypass
-pip install -r requirements.txt      # includes highspy -> portable HiGHS solver, no GLPK needed
+pip install -r requirements-lock.txt  # exact pinned environment
+pip install -e . --no-deps            # install GridMind without changing pins
 
-# Optional: prefer GLPK instead (no path is hardcoded in the code):
+# Optional: prefer GLPK or CBC instead (no path is hardcoded in the code):
 $env:GRIDMIND_SOLVER_PATH = "C:\glpk\w64\glpsol.exe"   # the file, or its folder
 # Persist for future sessions:  setx GRIDMIND_SOLVER_PATH "C:\glpk\w64\glpsol.exe"
 # Optional: $env:GRIDMIND_SOLVER = "glpk"
 
 python -m gridmind check-solver     # shows every candidate: glpk, cbc, appsi_highs
-pytest
+pytest -q                           # 258 passed, 1 intentionally skipped
 ```
+
+`tests/test_scalability.py` contains one opt-in performance test. It is skipped unless
+`GRIDMIND_RUN_PERF=1`; set that variable and run `pytest -q tests/test_scalability.py` to execute it.
+The skipped test is not counted as a pass.
+
 cmd.exe equivalent: `set GRIDMIND_SOLVER_PATH=C:\glpk\w64\glpsol.exe`.
 
 ## Usage
@@ -416,7 +427,7 @@ transparency) but the comparison uses `realized_*`. Executing the as-planned gen
 against different realized demand is generally **not physically feasible**, so its cost must not be
 used as a counterfactual.
 
-Honest reading of the measured results (author's environment, HiGHS, `data/sample_horizon.json`,
+Honest reading of the measured results (reference developer environment, HiGHS, `data/sample_horizon.json`,
 look-ahead 6, seed 20260201, sigmas 0.06/0.12). Both sides are feasible at realized inputs:
 
 | Run | controller cost | baseline cost | Δ cost | Δ unmet | Δ CVaR |
@@ -509,11 +520,14 @@ network** (they are references, not deployable schedules):
 
 ## Verification status (read this)
 
-* 211 tests: solver-free tests (data model, scenarios, determinism, validator, baselines, failure
-  handling, scenario generation, model structure, CVaR/VaR metrics, experiment statistics, control
-  forecast model) plus solver tests for both models, the stochastic layer, the comparative benchmark,
-  the rolling-horizon controller, and Stage 5C trace/inclusion integrity. Solver tests skip with a
-  reason when no solver is found.
+* 259 tests collected on 2026-11-01: **258 passed, 1 intentionally skipped**. The skip is the
+  opt-in scalability performance test (`GRIDMIND_RUN_PERF != 1`), not a pass. The suite covers
+  solver-free tests (data model, scenarios, determinism, validator, baselines, failure handling,
+  scenario generation, model structure, CVaR/VaR metrics, experiment statistics, control forecast
+  model) plus solver tests for both models, the stochastic layer, the comparative benchmark, the
+  rolling-horizon controller, Stage 5C trace/inclusion integrity, Stage 5E qualification gates,
+  artifact schemas, solver coverage and numerical robustness. Solver tests skip with a reason when
+  no solver is found.
 * Every multi-period solve is cross-checked two ways: the independent validator
   (`gridmind/validation.py`, no Pyomo) re-derives all constraints and the objective from the data,
   and `tests/reference_lp_mp.py` rebuilds the whole LP with `scipy.optimize.linprog` (HiGHS) and
@@ -525,8 +539,10 @@ network** (they are references, not deployable schedules):
   weights: VaR(0.5)=10, CVaR(0.5)=60; VaR(0.75)=20, CVaR(0.75)=100), and tested properties include
   "pure-CVaR in-sample CVaR <= risk-neutral CVaR", "wait-and-see expected cost <= committed expected
   cost", non-anticipativity equalities across scenarios, and infeasible scenarios returning no numbers.
-* The author's environment: Python 3.11 venv, pyomo 6.10.1, highspy (appsi_highs); the full suite
-  (211 tests) passes with HiGHS. Same seed => same scenarios and objectives across runs and solvers.
+* The reference environment: CPython 3.11.17, pyomo 6.10.1, highspy 1.15.1 (`appsi_highs`), on
+  Windows 10; **258 passed, 1 intentionally skipped** on 2026-11-01. GLPK and CBC were unavailable,
+  so cross-solver parity is not claimed. Same seed => same scenarios and objectives across runs and
+  the exercised solver.
 * Stage 5A benchmark integrity is tested: two runs of the same seeds produce byte-identical
   `experiment_config.json` and `per_scenario_metrics.csv` (only wall-clock timings differ); all three
   policies are asserted to evaluate the **same** holdout scenario ids; missing/failed policies are

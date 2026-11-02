@@ -27,7 +27,6 @@ import json
 import math
 import os
 import platform
-import statistics
 import subprocess
 import sys
 import time
@@ -36,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from benchmarks import schema
+from benchmarks import schema, stats as robust_stats
 
 SCHEMA_VERSION = schema.ARTIFACT_SCHEMA_VERSION
 PROVENANCE_SCHEMA_VERSION = schema.PROVENANCE_SCHEMA_VERSION
@@ -710,19 +709,11 @@ def run_workload(name: str, out_dir: str | Path) -> dict[str, Any]:
 
 
 def _stats(values: Iterable[float | None]) -> dict[str, Any] | None:
-    clean = sorted(float(v) for v in values if v is not None and math.isfinite(float(v)))
-    if not clean:
-        return None
-    return {
-        "samples": clean,
-        "count": len(clean),
-        "median": round(statistics.median(clean), 6),
-        "min": round(clean[0], 6),
-        "max": round(clean[-1], 6),
-    }
+    return robust_stats.summarize(values)
 
 
-def aggregate_repetitions(name: str, results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def aggregate_repetitions(name: str, results: Sequence[Mapping[str, Any]],
+                          warmups: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
     ok = [r for r in results if r.get("status") == "ok"]
     hashes = sorted({str(r.get("decision_sha256")) for r in ok if r.get("decision_sha256")})
     solvers = sorted({str(r.get("solver")) for r in ok if r.get("solver")})
@@ -744,6 +735,8 @@ def aggregate_repetitions(name: str, results: Sequence[Mapping[str, Any]]) -> di
         "decision_sha256": hashes[0] if len(hashes) == 1 else None,
         "decision_hashes": hashes,
         "repetitions": len(results),
+        "warmup_repetitions": len(warmups or ()),
+        "warmups": list(warmups or ()),
         "wall_seconds": _stats(r.get("wall_seconds") for r in ok),
         "solver_seconds": _stats(r.get("solver_seconds") for r in ok),
         "peak_rss_mb": _stats(r.get("peak_rss_mb") for r in ok),
@@ -755,13 +748,16 @@ def aggregate_repetitions(name: str, results: Sequence[Mapping[str, Any]]) -> di
 
 
 def measure(out_dir: str | Path, workload_names: Sequence[str] | None = None,
-            repetitions: int = 3, timeout_seconds: float = 1800.0) -> dict[str, Any]:
+            repetitions: int = 3, timeout_seconds: float = 1800.0,
+            warmup_repetitions: int = 0) -> dict[str, Any]:
     """Run each workload in a fresh child process; refuse to overwrite evidence."""
     out = Path(out_dir)
     if out.exists():
         raise QualificationError(f"refusing to overwrite existing evidence directory: {out}")
     if repetitions < 1:
         raise QualificationError("repetitions must be >= 1")
+    if warmup_repetitions < 0:
+        raise QualificationError("warmup_repetitions must be >= 0")
     names = list(workload_names) if workload_names else list(WORKLOAD_SPECS)
     unknown = sorted(set(names) - set(WORKLOAD_SPECS))
     if unknown:
@@ -769,32 +765,35 @@ def measure(out_dir: str | Path, workload_names: Sequence[str] | None = None,
     out.mkdir(parents=True)
     started_at_utc = _utc_now()
     environment = collect_environment()
+
+    def run_repetition(name: str, directory: Path) -> dict[str, Any]:
+        directory.mkdir(parents=True)
+        command = [sys.executable, "-m", "benchmarks.qualification", "_workload",
+                   "--name", name, "--out", str(directory)]
+        proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
+                              timeout=timeout_seconds, check=False)
+        result_path = directory / "workload_result.json"
+        if proc.returncode == 0 and result_path.exists():
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result["process_wall_seconds"] = None
+            return result
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "gridmind_workload_result",
+            "workload": name,
+            "status": "error",
+            "error": (proc.stderr.strip() or proc.stdout.strip()
+                      or f"child exited with {proc.returncode}"),
+            "returncode": proc.returncode,
+        }
+
     workloads: dict[str, Any] = {}
     for name in names:
-        reps: list[dict[str, Any]] = []
-        for index in range(1, repetitions + 1):
-            rep_dir = out / name / f"rep-{index:02d}"
-            rep_dir.mkdir(parents=True)
-            command = [sys.executable, "-m", "benchmarks.qualification", "_workload",
-                       "--name", name, "--out", str(rep_dir)]
-            proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
-                                  timeout=timeout_seconds, check=False)
-            result_path = rep_dir / "workload_result.json"
-            if proc.returncode == 0 and result_path.exists():
-                rep = json.loads(result_path.read_text(encoding="utf-8"))
-                rep["process_wall_seconds"] = None
-                reps.append(rep)
-            else:
-                reps.append({
-                    "schema_version": SCHEMA_VERSION,
-                    "kind": "gridmind_workload_result",
-                    "workload": name,
-                    "status": "error",
-                    "error": (proc.stderr.strip() or proc.stdout.strip()
-                              or f"child exited with {proc.returncode}"),
-                    "returncode": proc.returncode,
-                })
-        workloads[name] = aggregate_repetitions(name, reps)
+        warmups = [run_repetition(name, out / name / f"warmup-{index:02d}")
+                   for index in range(1, warmup_repetitions + 1)]
+        reps = [run_repetition(name, out / name / f"rep-{index:02d}")
+                for index in range(1, repetitions + 1)]
+        workloads[name] = aggregate_repetitions(name, reps, warmups)
     finished_at_utc = _utc_now()
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -804,6 +803,7 @@ def measure(out_dir: str | Path, workload_names: Sequence[str] | None = None,
         "provenance": _provenance(environment, started_at_utc, finished_at_utc),
         "harness": {
             "repetitions": repetitions,
+            "warmup_repetitions": warmup_repetitions,
             "workloads": names,
             "timeout_seconds": timeout_seconds,
             "command": "python -m benchmarks.qualification measure",
@@ -933,8 +933,15 @@ def _check(workload: str, metric: str, kind: str, actual: Any, limit: Any,
 def evaluate_gate(measurement: Mapping[str, Any], baseline: Mapping[str, Any],
                   workload_names: Sequence[str] | None = None,
                   require_deterministic: bool = True,
-                  require_same_solver: bool = True) -> dict[str, Any]:
-    """Compare measurements to a committed baseline; return a structured decision."""
+                  require_same_solver: bool = True,
+                  require_performance: bool = True) -> dict[str, Any]:
+    """Compare measurements to a committed baseline; return a structured decision.
+
+    ``require_performance=False`` keeps the portable checks (schema, determinism,
+    decision hash and solver identity) while omitting wall, solver-time and RSS
+    thresholds. It is intended for shared CI runners whose timing is not
+    comparable with the reference machine.
+    """
     errors = validate_baseline(baseline)
     if errors:
         raise QualificationError("invalid baseline:\n- " + "\n- ".join(errors))
@@ -969,6 +976,8 @@ def evaluate_gate(measurement: Mapping[str, Any], baseline: Mapping[str, Any],
             actual_solver = actual.get("solver")
             checks.append(_check(name, "solver", "environment", actual_solver,
                                  expected_solver, actual_solver == expected_solver))
+        if not require_performance:
+            continue
         thresholds = expected.get("thresholds", {})
         wall = actual.get("wall_seconds") or {}
         if "wall_seconds_max" in thresholds:
@@ -1006,7 +1015,7 @@ def _parse_names(value: str | None) -> list[str] | None:
 
 def _cmd_measure(args: argparse.Namespace) -> int:
     payload = measure(args.out, _parse_names(args.workloads), args.repetitions,
-                      args.timeout)
+                      args.timeout, args.warmup)
     print(f"wrote {Path(args.out) / 'measurements.json'}")
     for name, record in payload["workloads"].items():
         wall = record.get("wall_seconds") or {}
@@ -1049,7 +1058,8 @@ def _cmd_gate(args: argparse.Namespace) -> int:
     result = evaluate_gate(_load_json(args.measurements), _load_json(args.baseline),
                            _parse_names(args.workloads),
                            require_deterministic=not args.allow_nondeterministic,
-                           require_same_solver=not args.allow_solver_change)
+                           require_same_solver=not args.allow_solver_change,
+                           require_performance=not args.reproducibility_only)
     print(f"{'PASS' if result['passed'] else 'FAIL'} "
           f"({len(result['checks'])} checks, {len(result['failures'])} failures)")
     for check in result["checks"]:
@@ -1067,6 +1077,8 @@ def build_parser() -> argparse.ArgumentParser:
     measure_parser.add_argument("--out", required=True, help="new output directory")
     measure_parser.add_argument("--workloads", help="comma-separated workload names")
     measure_parser.add_argument("--repetitions", type=int, default=3)
+    measure_parser.add_argument("--warmup", type=int, default=0,
+                                help="recorded warm-up children excluded from statistics")
     measure_parser.add_argument("--timeout", type=float, default=1800.0,
                                 help="per-child timeout in seconds")
     measure_parser.set_defaults(func=_cmd_measure)
@@ -1086,6 +1098,9 @@ def build_parser() -> argparse.ArgumentParser:
     gate_parser.add_argument("--workloads", help="comma-separated subset to gate")
     gate_parser.add_argument("--allow-nondeterministic", action="store_true")
     gate_parser.add_argument("--allow-solver-change", action="store_true")
+    gate_parser.add_argument("--reproducibility-only", action="store_true",
+                             help="check schema, determinism, decision hash and solver; "
+                                  "skip machine-specific performance thresholds")
     gate_parser.set_defaults(func=_cmd_gate)
 
     workload_parser = sub.add_parser("_workload", help=argparse.SUPPRESS)
