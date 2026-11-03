@@ -55,7 +55,7 @@ def test_run_captured_returns_completed_process_and_output(monkeypatch):
 
 
 def test_run_captured_terminates_and_reaps_child_on_keyboard_interrupt(monkeypatch):
-    child = FakeProcess(communicate_error=KeyboardInterrupt())
+    child = FakeProcess(communicate_error=KeyboardInterrupt(), returncode=None)
     monkeypatch.setattr(process.subprocess, "Popen", lambda *args, **kwargs: child)
 
     with pytest.raises(KeyboardInterrupt):
@@ -68,7 +68,7 @@ def test_run_captured_terminates_and_reaps_child_on_keyboard_interrupt(monkeypat
 
 def test_run_captured_kills_child_when_timeout_expires(monkeypatch):
     child = FakeProcess(
-        communicate_error=subprocess.TimeoutExpired(["worker"], 0.01)
+        communicate_error=subprocess.TimeoutExpired(["worker"], 0.01), returncode=None
     )
     monkeypatch.setattr(process.subprocess, "Popen", lambda *args, **kwargs: child)
 
@@ -89,7 +89,7 @@ def test_run_captured_kills_child_if_terminate_does_not_finish(monkeypatch):
             self.returncode = -9
             return self.returncode
 
-    child = SlowToStop(communicate_error=KeyboardInterrupt())
+    child = SlowToStop(communicate_error=KeyboardInterrupt(), returncode=None)
     monkeypatch.setattr(process.subprocess, "Popen", lambda *args, **kwargs: child)
 
     with pytest.raises(KeyboardInterrupt):
