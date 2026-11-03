@@ -200,6 +200,17 @@ def peak_rss_mb() -> float | None:
         return None
 
 
+def _parse_solver_version(name: str, output: str) -> str | None:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return None
+    if name == "cbc":
+        for line in lines:
+            if line.lower().startswith("version:"):
+                return line
+    return lines[0]
+
+
 def _solver_version(name: str) -> str | None:
     """Best-effort version string for a solver plugin or executable."""
     if name == "appsi_highs":
@@ -211,8 +222,7 @@ def _solver_version(name: str) -> str | None:
             return None
         proc = subprocess.run([executable, "--version"], capture_output=True, text=True,
                               timeout=5, check=False)
-        text = (proc.stdout or proc.stderr).strip().splitlines()
-        return text[0].strip() if text else None
+        return _parse_solver_version(name, proc.stdout or proc.stderr)
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -770,8 +780,25 @@ def measure(out_dir: str | Path, workload_names: Sequence[str] | None = None,
         directory.mkdir(parents=True)
         command = [sys.executable, "-m", "benchmarks.qualification", "_workload",
                    "--name", name, "--out", str(directory)]
-        proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
-                              timeout=timeout_seconds, check=False)
+        try:
+            proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
+                                  timeout=timeout_seconds, check=False)
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "gridmind_workload_result",
+                "workload": name,
+                "status": "error",
+                "error": f"child timed out after {timeout_seconds}s: {exc}",
+            }
+        except OSError as exc:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "gridmind_workload_result",
+                "workload": name,
+                "status": "error",
+                "error": f"child could not be started: {type(exc).__name__}: {exc}",
+            }
         result_path = directory / "workload_result.json"
         if proc.returncode == 0 and result_path.exists():
             result = json.loads(result_path.read_text(encoding="utf-8"))

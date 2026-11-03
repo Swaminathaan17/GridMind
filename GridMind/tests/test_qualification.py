@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -105,6 +106,16 @@ def test_environment_manifest_has_required_provenance():
     assert "pyomo" in env["packages"]
     assert isinstance(env["solvers"], list)
     assert "commit" in env["git"] and "dirty" in env["git"]
+
+
+def test_solver_version_parses_cbc_banner_and_glpk_line():
+    cbc = ("Welcome to the CBC MILP Solver\nVersion: 2.10.13\n"
+           "Build Date: Mar 12 2026\n")
+    assert q._parse_solver_version("cbc", cbc) == "Version: 2.10.13"
+    assert q._parse_solver_version(
+        "glpk", "GLPSOL: GLPK LP/MIP Solver, v4.65\nCopyright\n"
+    ) == "GLPSOL: GLPK LP/MIP Solver, v4.65"
+    assert q._parse_solver_version("cbc", "  \n") is None
 
 
 def test_peak_rss_is_reported_when_supported():
@@ -282,6 +293,28 @@ def test_run_workload_reports_missing_solver(tmp_path, monkeypatch):
     assert result["status"] == "error"
     assert "solver unavailable" in result["error"]
     assert (tmp_path / "workload_result.json").exists()
+
+
+def test_measure_records_child_timeout_instead_of_crashing(tmp_path, monkeypatch):
+    def timed_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="child", timeout=kwargs.get("timeout", 1))
+
+    monkeypatch.setattr(q.subprocess, "run", timed_out)
+    result = q.measure(tmp_path / "run", ["smoke"], repetitions=1, timeout_seconds=0.01)
+    record = result["workloads"]["smoke"]
+    assert record["status"] == "error"
+    assert any("timed out" in str(error) for error in record["errors"])
+
+
+def test_measure_records_child_start_failure_instead_of_crashing(tmp_path, monkeypatch):
+    def cannot_start(*args, **kwargs):
+        raise OSError("executable vanished")
+
+    monkeypatch.setattr(q.subprocess, "run", cannot_start)
+    result = q.measure(tmp_path / "run", ["smoke"], repetitions=1)
+    record = result["workloads"]["smoke"]
+    assert record["status"] == "error"
+    assert any("could not be started" in str(error) for error in record["errors"])
 
 
 def test_measurement_without_provenance_is_rejected():

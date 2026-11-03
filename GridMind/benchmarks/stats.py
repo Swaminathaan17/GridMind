@@ -80,6 +80,24 @@ def median_interval(values: Sequence[float],
     return selected
 
 
+def minimum_median_interval_samples(
+        confidence: float = DEFAULT_CONFIDENCE) -> int | None:
+    """Smallest sample size with a defined order-statistic median interval.
+
+    A distribution-free median interval based on a binomial sign test needs
+    enough observations that the selected order statistic is not the sample
+    minimum or maximum at the requested nominal coverage. For 0.95 this is six
+    observations; smaller samples report no interval rather than a fabricated
+    one.
+    """
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be between 0 and 1")
+    for size in range(1, 1001):
+        if median_interval(list(range(size)), confidence) is not None:
+            return size
+    return None
+
+
 def _quartiles(ordered: Sequence[float]) -> tuple[float, float]:
     if len(ordered) == 1:
         return ordered[0], ordered[0]

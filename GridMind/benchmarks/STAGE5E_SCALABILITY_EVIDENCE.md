@@ -139,10 +139,49 @@ growth `1.2 MiB` (`suspected: false`). The differing exponents confirm that the
 cold-start wall-time term is noise-dominated; this rerun is a local reproducibility
 check, not additional capacity evidence.
 
+## Fresh E9 multi-batch statistical evidence (2026-11-02)
+
+The original run above used one sample per size. The E9 reliability harness now
+collects independent batches and reports uncertainty:
+
+- Artifact: `benchmarks/runs/stage5e_e9_final_20261102/reliability.json` (gitignored)
+- Kind: `gridmind_statistical_matrix`, schema version 1, harness `5E.4`
+- Generated: `2026-11-02T15:16:28Z`
+- Recorded branch/commit: `stage-5e-work-in-progress` /
+  `6ce5ee601bd7f7cf36371429c6d7d193075f04ee`, `dirty: true`
+- Configuration: 3 scalability batches x 3 repetitions per size; leak probe 3
+  batches x 5 repetitions. Median interval: distribution-free binomial order
+  statistic (achieved coverage 0.964844 at n=15). Exponent interval: 10,000
+  bootstrap resamples, seed `20261101`.
+
+| Family | Sizes | Samples/size | Time exponent | Bootstrap 95% CI | RSS growth |
+|---|---|---:|---:|---|---:|
+| `dispatch_lp` | 10, 40, 160 | 9 | 0.087698 | 0.007223 - 0.133149 | 2.2 MiB (x1.037) |
+| `schedule_mip` | 8, 24, 48 | 9 | 0.120748 | -0.025166 - 0.161263 | 1.4 MiB (x1.023) |
+
+All functional, statistical, performance and scalability categories passed. The
+leak probe was not suspected in any batch (1.2-1.4 MiB, about 1.9-2.3%, against
+64 MiB / 10% limits). The exponents remain dominated by Pyomo/process startup and
+are bounded over the observed sizes only; this still does not establish asymptotic
+complexity, production capacity or cross-machine portability. The artifact records
+`dirty: true` because the reviewed fixes were uncommitted; regenerate it after
+commit if clean provenance is required.
+
+Reproduction:
+
+```powershell
+python -m benchmarks.reliability run `
+  --out benchmarks/runs/stage5e_e9_final_<label>
+```
+
 ## Validation performed
 
 ```text
 python -c "from benchmarks import schema; import json; ..."
 schema errors: 0
 summary: {'checks': 13, 'failures': 0, 'passed': True}
+
+python -c "from benchmarks import schema; import json; ... reliability.json"
+schema errors: 0
+acceptance: {'functional': True, 'statistical': True, 'performance': True, 'scalability': True}
 ```

@@ -59,6 +59,54 @@ and solver identity, but skips the wall-time, solver-time and RSS thresholds,
 which are only meaningful on the reference machine. CI runs this gate against
 the committed baseline on every push and pull request.
 
+## Multi-solver coverage (GLPK/CBC)
+
+`appsi_highs` is installed with the Python dependencies. GLPK and CBC are optional
+external executables and are not bundled. The verified Windows setup uses the
+official GLPK 4.65 and CBC 2.10.13 archives, installed outside the repository:
+
+```powershell
+$tools = Join-Path $env:TEMP "e5-solvers"
+New-Item -ItemType Directory -Force $tools | Out-Null
+
+curl.exe -L "https://sourceforge.net/projects/winglpk/files/latest/download" `
+  -o "$tools\winglpk-4.65.zip"
+curl.exe -L "https://github.com/coin-or/Cbc/releases/download/releases/2.10.13/Cbc-releases.2.10.13-w64-msvc17-md.zip" `
+  -o "$tools\cbc-2.10.13.zip"
+
+Get-FileHash -Algorithm SHA256 "$tools\winglpk-4.65.zip"
+# expected A8C195B92682C3AC1F6DAE5F6CE2472C2478835F9873BE4A0C6771C37DB53C2D
+Get-FileHash -Algorithm SHA256 "$tools\cbc-2.10.13.zip"
+# expected B9702AD7501B4249A9721984CE3C6DC8FB9B6CFB995F42D493A5BD54B8F42A74
+
+Expand-Archive -LiteralPath "$tools\winglpk-4.65.zip" `
+  -DestinationPath "$tools\glpk" -Force
+Expand-Archive -LiteralPath "$tools\cbc-2.10.13.zip" `
+  -DestinationPath "$tools\cbc-msvc" -Force
+
+$env:PATH = "$tools\glpk\glpk-4.65\w64;$tools\cbc-msvc\bin;$env:PATH"
+python -m gridmind check-solver
+python -m benchmarks.solver_coverage run `
+  --out benchmarks/runs/solvers_<label>
+```
+
+The SourceForge "latest" URL currently resolves to `winglpk-4.65.zip`; verify the
+SHA-256 before extracting. Use the CBC `w64-msvc17-md` archive on Windows (the
+MinGW archive required a DLL that was absent on the reference machine). The
+coverage harness removes `GRIDMIND_SOLVER_PATH` from child probes, so both
+executable directories must be on `PATH`; setting `GRIDMIND_SOLVER_PATH` alone is
+not sufficient for this command.
+
+The current local artifact is
+`benchmarks/runs/stage5e_e5_coverage_glpk_cbc_20261102/coverage.json` (schema
+errors 0, SHA-256
+`C68318F0B5250252E99132CFCD379F5281D338B800921B277208168B7F82E950`). GLPK 4.65,
+CBC 2.10.13 and `appsi_highs` 1.15.1 each passed both formulations: LP objective
+`20300.0`, MIP objective `400.0`, zero objective delta and zero maximum constraint
+violation, within the `1e-6` relative tolerance. These are the harness's tiny
+probe formulations, not production-scale performance evidence. Use a new output
+label for every run; the command refuses to overwrite existing evidence.
+
 ## Other Stage 5E evidence
 
 These commands use the same artifact schemas and provenance capture:
@@ -69,22 +117,38 @@ python -m benchmarks.scalability run `
 
 python -m benchmarks.solver_coverage run `
   --out benchmarks/runs/solvers_<label>
+
+python -m benchmarks.reliability run `
+  --out benchmarks/runs/reliability_<label>
 ```
 
 `scalability` measures LP dispatch and multi-period MIP growth, peak RSS and a
-repeated-run leak probe. The committed summary is
-`STAGE5E_SCALABILITY_EVIDENCE.md`; the raw artifact stays under the gitignored
+repeated-run leak probe. `reliability` collects independent batches of the
+qualification workloads plus independent scalability batches, then applies the
+robust statistics and acceptance gates from `stats.py` and `reliability.py`. The
+committed summaries are `STAGE5E_SCALABILITY_EVIDENCE.md` and
+`../STAGE5E_QUALIFICATION.md`; raw artifacts stay under the gitignored
 `benchmarks/runs/` directory. `solver_coverage` probes every discovered solver;
-on this machine only `appsi_highs` is available, so GLPK/CBC parity is not
-claimed. The opt-in performance test runs with:
+the current local run verified GLPK, CBC and `appsi_highs` (see the next section).
+The opt-in performance test runs with:
 
 ```powershell
 $env:GRIDMIND_RUN_PERF = "1"
 python -m pytest -q tests/test_scalability.py
 ```
 
-The full requirement matrix and local command evidence are in
-`../STAGE5E_AUDIT.md`. Stage 5E remains **in progress and not accepted**.
+E9 defaults are 3 batches x 5 measured repetitions + 1 warm-up for each
+performance workload and 3 batches x 3 repetitions per scalability size. The
+harness refuses to overwrite an existing directory and rejects zero successful
+repetitions, missing warm-ups, incomplete batches, fewer than two successful
+scalability sizes and child-process timeouts. The 95% median interval needs at
+least 6 observations; below that it reports no interval and the corresponding
+gate fails rather than inventing one. The full requirement matrix and local
+command evidence are in `../STAGE5E_AUDIT.md` and
+`../STAGE5E_ACCEPTANCE_REPORT.md`. E5 and E9 are complete locally; Stage 5E remains
+**not accepted** pending clean-provenance release evidence and a final review. The
+pushed `6ce5ee6` CI run passed Windows and Ubuntu (maintainer-reported);
+uncommitted changes here are verified locally only.
 
 ## Threshold policy
 
@@ -105,7 +169,8 @@ that machine or an equivalent runner, not on shared CI hardware.
 ## Limitations
 
 - Wall time includes Python/Pyomo model construction, not only solver time.
-- Measurements were taken with `appsi_highs`; GLPK and CBC were unavailable.
+- Qualification performance measurements were taken with `appsi_highs`; the
+  GLPK/CBC coverage run is separate and does not recalibrate the baseline.
 - The workloads use the synthetic sample network and horizon; they are not a
   production-scale capacity test.
 - The default LP battery formulation can permit simultaneous charge/discharge;

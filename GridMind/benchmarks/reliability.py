@@ -97,6 +97,15 @@ def analyze_performance(records: Sequence[Mapping[str, Any]],
         solver = [float(rep["solver_seconds"]) for rep in ok
                   if rep.get("solver_seconds") is not None]
         rss = [float(rep["peak_rss_mb"]) for rep in ok if rep.get("peak_rss_mb") is not None]
+        if not ok or not wall:
+            raise q.QualificationError(
+                f"workload {name}: no successful measured repetitions; "
+                "cannot compute reliability statistics")
+        batch_counts = [len(record["payload"]["workloads"][name]["results"])
+                        for record in records]
+        expected_per_batch = expected_repetitions // len(records)
+        warmup_counts = [len(record["payload"]["workloads"][name].get("warmups", []))
+                         for record in records]
         hashes = sorted({str(rep.get("decision_sha256")) for rep in ok
                          if rep.get("decision_sha256")})
         solvers = sorted({str(rep.get("solver")) for rep in ok if rep.get("solver")})
@@ -112,6 +121,9 @@ def analyze_performance(records: Sequence[Mapping[str, Any]],
         solver_ci = (summary["solver_seconds"]["median_interval"]
                      if summary["solver_seconds"] else None)
         all_ok = len(ok) == len(reps) == expected_repetitions
+        wall_median = summary["wall_seconds"]["median"] if summary["wall_seconds"] else None
+        solver_median = (summary["solver_seconds"]["median"]
+                         if summary["solver_seconds"] else None)
         checks.extend([
             _check("functional", f"{name}:repetitions_complete", all_ok,
                    f"ok={len(ok)} measured={len(reps)} expected={expected_repetitions}"),
@@ -119,14 +131,30 @@ def analyze_performance(records: Sequence[Mapping[str, Any]],
                    f"hashes={hashes}"),
             _check("functional", f"{name}:solver_stable", len(solvers) == 1,
                    f"solvers={solvers}"),
+            _check("statistical", f"{name}:batches_complete",
+                   len(records) >= 2
+                   and all(count == expected_per_batch for count in batch_counts),
+                   f"batches={len(records)} counts={batch_counts} "
+                   f"expected_per_batch={expected_per_batch}"),
+            _check("statistical", f"{name}:warmups_recorded",
+                   all(count >= 1 for count in warmup_counts),
+                   f"warmups={warmup_counts}"),
             _check("statistical", f"{name}:wall_samples", len(wall) == expected_repetitions,
                    f"count={len(wall)} expected={expected_repetitions}"),
             _check("statistical", f"{name}:wall_median_interval", wall_ci is not None,
                    f"interval={wall_ci}"),
+            _check("performance", f"{name}:wall_median_point",
+                   wall_median is not None
+                   and float(wall_median) <= float(limits["wall_seconds_max"]),
+                   f"median={wall_median} limit={limits['wall_seconds_max']}"),
             _check("performance", f"{name}:wall_median_upper_bound",
                    wall_ci is not None and wall_ci["upper"] <= float(limits["wall_seconds_max"]),
                    f"upper={None if wall_ci is None else wall_ci['upper']} "
                    f"limit={limits['wall_seconds_max']}"),
+            _check("performance", f"{name}:solver_median_point",
+                   solver_median is not None
+                   and float(solver_median) <= float(limits["solver_seconds_max"]),
+                   f"median={solver_median} limit={limits['solver_seconds_max']}"),
             _check("performance", f"{name}:solver_median_upper_bound",
                    solver_ci is not None
                    and solver_ci["upper"] <= float(limits["solver_seconds_max"]),
@@ -156,9 +184,10 @@ def _per_size_samples(records: Sequence[Mapping[str, Any]], kind: str,
     groups: dict[int, list[float]] = {}
     for record in records:
         for run in record["payload"]["families"][kind]["runs"]:
-            size = int(run["size"])
-            groups.setdefault(size, []).extend(
-                _run_samples(run, samples_key, value_key))
+            samples = _run_samples(run, samples_key, value_key)
+            if not samples:
+                continue
+            groups.setdefault(int(run["size"]), []).extend(samples)
     return groups
 
 
@@ -175,6 +204,10 @@ def analyze_scalability(records: Sequence[Mapping[str, Any]],
                                           "solver_seconds")
         rss_groups = _per_size_samples(records, kind, "rss_samples_mb", "peak_rss_mb")
         sizes = sorted(wall_groups)
+        if len(sizes) < 2:
+            raise q.QualificationError(
+                f"{kind}: fewer than two successful scalability sizes; "
+                "cannot compute growth evidence")
         runs = [run for record in records
                 for run in record["payload"]["families"][kind]["runs"]]
         ok = [run for run in runs if run.get("status") == "ok"]
@@ -224,6 +257,8 @@ def analyze_scalability(records: Sequence[Mapping[str, Any]],
                    f"objectives={ {size: sorted(values) for size, values in objectives.items()} }"),
             _check("functional", f"{kind}:solver_stable", len(solvers) == 1,
                    f"solvers={solvers}"),
+            _check("statistical", f"{kind}:size_count", len(sizes) >= 2,
+                   f"sizes={sizes}"),
             _check("statistical", f"{kind}:replicates_per_size",
                    all(count >= expected_per_size for count in replicate_counts.values()),
                    f"counts={replicate_counts} expected>={expected_per_size}"),
@@ -293,8 +328,8 @@ def run_reliability(out_dir: str | Path, *, baseline_path: str | Path | None = N
         raise q.QualificationError("batches must be at least 2 for reliability evidence")
     if repetitions < 2 or scalability_repetitions < 2:
         raise q.QualificationError("repetitions must be at least 2")
-    if warmups < 0:
-        raise q.QualificationError("warmups must be >= 0")
+    if warmups < 1:
+        raise q.QualificationError("warmups must be at least 1 for reliability evidence")
     baseline_file = Path(baseline_path) if baseline_path else q.DEFAULT_BASELINE
     baseline = json.loads(baseline_file.read_text(encoding="utf-8"))
     baseline_errors = schema.validate_baseline_artifact(baseline)
@@ -337,11 +372,24 @@ def run_reliability(out_dir: str | Path, *, baseline_path: str | Path | None = N
             "scalability_repetitions_per_size": scalability_repetitions,
             "primary_location": "median",
             "median_interval": "distribution-free binomial order statistic, nominal 0.95",
+            "median_interval_method": (
+                "order statistics of a two-sided binomial sign test; achieved coverage is "
+                "recorded and no interval is reported when the sample is too small"),
+            "minimum_samples_for_median_interval": (
+                robust_stats.minimum_median_interval_samples()),
+            "sample_requirement": (
+                "at least two independent batches and two measured repetitions per batch; "
+                "each performance workload uses all batch repetitions pooled for its interval"),
             "dispersion": ["IQR", "MAD", "sample standard deviation", "CV"],
-            "outliers": "Tukey 1.5*IQR flagged and retained",
+            "outliers": "Tukey 1.5*IQR flagged and retained; raw samples are never removed",
+            "warmup_policy": (
+                "at least one warm-up child per workload and batch is recorded separately and "
+                "excluded from all measured statistics"),
             "decision_reproducibility": "all canonical decision hashes must match",
             "performance_decision": (
-                "upper bound of the 95% median interval must not exceed the baseline limit"),
+                "the median point estimate and the conservative upper bound of the 95% median "
+                "interval must both stay within the baseline limit; the upper-bound check "
+                "exposes statistical uncertainty separately from a pure regression"),
             "scalability_decision": (
                 "point exponent and bootstrap 95% upper bound must not exceed the configured "
                 "limit; reported as uncertainty over observed sizes, not an asymptotic proof"),
