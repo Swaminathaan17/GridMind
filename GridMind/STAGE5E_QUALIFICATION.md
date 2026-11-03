@@ -1,3 +1,25 @@
+> **Final status update — 2026-11-03:** The earlier dated status/history below is
+> retained as a record of the work in progress and is superseded by the final
+> acceptance decision in [STAGE5E_ACCEPTANCE_REPORT.md](STAGE5E_ACCEPTANCE_REPORT.md).
+> Stage 5E is now **ACCEPTED for its stated reproducibility and qualification
+> scope**, with synthetic/local benchmark and solver-probe limitations.
+>
+> Clean E9 artifact:
+> `benchmarks/runs/stage5e_e9_clean_20261103/reliability.json` (local/gitignored),
+> SHA-256
+> `20EBB33B32A4C2DAC8F11766FA2FA74991052E7D8C310C662270A1117D3FF201`.
+> It was generated from clean detached worktree commit
+> `10eded5c056c15b45c341a39c7f73b80fcdea2ed`, with `dirty=false`.
+> Schema validation returned 0 errors; acceptance passed all four categories:
+> functional, statistical, performance and scalability. The clean-worktree solver
+> inventory had `appsi_highs` 1.15.1; GLPK/CBC were unavailable there. Three-solver
+> LP/MIP parity remains supported by the separate E5 coverage artifact.
+>
+> Latest GitHub Actions run `41623451166` passed Ubuntu and Windows for commit
+> `10eded5`. The raw E9/E5 artifacts remain local and gitignored; hashes are
+> recorded in the acceptance report. Documentation commits after the tested code
+> commit do not alter the code revision represented by E9.
+
 # Stage 5E qualification status (E5 and E9 complete, acceptance pending clean provenance)
 
 **Branch:** `stage-5e-work-in-progress`
