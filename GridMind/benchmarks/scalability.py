@@ -33,6 +33,7 @@ from typing import Any, Mapping, Sequence
 
 from benchmarks import schema, stats as robust_stats
 from benchmarks.progress import ProgressReporter
+from benchmarks.process import run_captured
 from benchmarks.qualification import (
     ROOT,
     QualificationError,
@@ -163,8 +164,7 @@ def _run_child(kind: str, size: int, repetitions: int, out_dir: Path,
                "--kind", kind, "--size", str(size),
                "--repetitions", str(repetitions), "--out", str(probe_dir)]
     try:
-        proc = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True,
-                              timeout=timeout_seconds, check=False)
+        proc = run_captured(command, cwd=ROOT, env=env, timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
         return {"status": "error", "workload": kind, "size": size,
                 "error": f"worker timed out after {timeout_seconds}s: {exc}"}

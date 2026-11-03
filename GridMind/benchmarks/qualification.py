@@ -37,6 +37,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from benchmarks import schema, stats as robust_stats
 from benchmarks.progress import ProgressReporter
+from benchmarks.process import run_captured
 
 SCHEMA_VERSION = schema.ARTIFACT_SCHEMA_VERSION
 PROVENANCE_SCHEMA_VERSION = schema.PROVENANCE_SCHEMA_VERSION
@@ -788,8 +789,7 @@ def measure(out_dir: str | Path, workload_names: Sequence[str] | None = None,
                    "--name", name, "--out", str(directory)]
         started = time.perf_counter()
         try:
-            proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
-                                  timeout=timeout_seconds, check=False)
+            proc = run_captured(command, cwd=ROOT, timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
             elapsed = time.perf_counter() - started
             progress(f"child {name} {label} ended after {elapsed:.3f}s status=timeout")
