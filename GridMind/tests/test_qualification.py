@@ -1,11 +1,14 @@
 """Stage 5E qualification harness: manifests, determinism and gate decisions."""
 from __future__ import annotations
 
+import io
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
+from benchmarks import progress
 from benchmarks import qualification as q
 from helpers import SOLVER_MSG, SOLVER_OK
 
@@ -357,3 +360,68 @@ def test_smoke_workload_is_reproducible(tmp_path):
     assert first["decision_sha256"] == second["decision_sha256"]
     assert json.loads((tmp_path / "first" / "workload_result.json").read_text(
         encoding="utf-8"))["decision_sha256"] == first["decision_sha256"]
+
+
+class _RecordingStream(io.StringIO):
+    def __init__(self):
+        super().__init__()
+        self.flushes = 0
+
+    def flush(self):
+        self.flushes += 1
+        super().flush()
+
+
+def _fake_successful_child(command, **kwargs):
+    if "--out" not in command:
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+    out = Path(command[command.index("--out") + 1])
+    payload = _rep()
+    payload["workload"] = command[command.index("--name") + 1]
+    (out / "workload_result.json").write_text(json.dumps(payload), encoding="utf-8")
+    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+
+def test_measure_progress_is_timestamped_flushed_and_reports_repetitions(
+        tmp_path, monkeypatch):
+    stream = _RecordingStream()
+    reporter = progress.ProgressReporter(stream=stream)
+    monkeypatch.setattr(q.subprocess, "run", _fake_successful_child)
+    result = q.measure(tmp_path / "run", ["smoke"], repetitions=2,
+                       warmup_repetitions=1, progress=reporter)
+    text = stream.getvalue()
+    lines = text.splitlines()
+    assert result["workloads"]["smoke"]["status"] == "ok"
+    assert stream.flushes >= len(lines) >= 1
+    for fragment in (
+            "qualification measure starting:",
+            "workload smoke (1/1) starting",
+            "workload smoke: warm-up 1/1 starting",
+            "child smoke warm-up 1/1 completed",
+            "workload smoke: repetition 1/2 starting",
+            "child smoke repetition 2/2 completed",
+            "artifact written:"):
+        assert fragment in text
+    assert all(line.startswith("[") and "] " in line for line in lines)
+
+
+def test_measure_progress_reports_interruption_without_completion_artifact(
+        tmp_path, monkeypatch):
+    stream = io.StringIO()
+    reporter = progress.ProgressReporter(stream=stream)
+
+    def interrupted(command, **kwargs):
+        if "--name" not in command:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(q.subprocess, "run", interrupted)
+    out = tmp_path / "run"
+    with pytest.raises(KeyboardInterrupt):
+        q.measure(out, ["smoke"], repetitions=1, warmup_repetitions=1,
+                  progress=reporter)
+    text = stream.getvalue()
+    assert "workload smoke: warm-up 1/1 starting" in text
+    assert "interrupted during workload smoke: warm-up 1/1" in text
+    assert not (out / "measurements.json").exists()
+    assert (out / "smoke" / "warmup-01").is_dir()

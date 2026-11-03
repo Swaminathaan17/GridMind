@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from benchmarks import schema, stats as robust_stats
+from benchmarks.progress import ProgressReporter
 
 SCHEMA_VERSION = schema.ARTIFACT_SCHEMA_VERSION
 PROVENANCE_SCHEMA_VERSION = schema.PROVENANCE_SCHEMA_VERSION
@@ -759,9 +760,12 @@ def aggregate_repetitions(name: str, results: Sequence[Mapping[str, Any]],
 
 def measure(out_dir: str | Path, workload_names: Sequence[str] | None = None,
             repetitions: int = 3, timeout_seconds: float = 1800.0,
-            warmup_repetitions: int = 0) -> dict[str, Any]:
+            warmup_repetitions: int = 0,
+            progress: ProgressReporter | None = None) -> dict[str, Any]:
     """Run each workload in a fresh child process; refuse to overwrite evidence."""
     out = Path(out_dir)
+    if progress is None:
+        progress = ProgressReporter()
     if out.exists():
         raise QualificationError(f"refusing to overwrite existing evidence directory: {out}")
     if repetitions < 1:
@@ -773,17 +777,22 @@ def measure(out_dir: str | Path, workload_names: Sequence[str] | None = None,
     if unknown:
         raise QualificationError(f"unknown workloads: {unknown}; choose from {sorted(WORKLOAD_SPECS)}")
     out.mkdir(parents=True)
+    progress(f"qualification measure starting: out={out} workloads={len(names)} "
+             f"repetitions={repetitions} warmups={warmup_repetitions}")
     started_at_utc = _utc_now()
     environment = collect_environment()
 
-    def run_repetition(name: str, directory: Path) -> dict[str, Any]:
+    def run_repetition(name: str, directory: Path, label: str) -> dict[str, Any]:
         directory.mkdir(parents=True)
         command = [sys.executable, "-m", "benchmarks.qualification", "_workload",
                    "--name", name, "--out", str(directory)]
+        started = time.perf_counter()
         try:
             proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
                                   timeout=timeout_seconds, check=False)
         except subprocess.TimeoutExpired as exc:
+            elapsed = time.perf_counter() - started
+            progress(f"child {name} {label} ended after {elapsed:.3f}s status=timeout")
             return {
                 "schema_version": SCHEMA_VERSION,
                 "kind": "gridmind_workload_result",
@@ -792,6 +801,8 @@ def measure(out_dir: str | Path, workload_names: Sequence[str] | None = None,
                 "error": f"child timed out after {timeout_seconds}s: {exc}",
             }
         except OSError as exc:
+            elapsed = time.perf_counter() - started
+            progress(f"child {name} {label} ended after {elapsed:.3f}s status=error")
             return {
                 "schema_version": SCHEMA_VERSION,
                 "kind": "gridmind_workload_result",
@@ -799,28 +810,49 @@ def measure(out_dir: str | Path, workload_names: Sequence[str] | None = None,
                 "status": "error",
                 "error": f"child could not be started: {type(exc).__name__}: {exc}",
             }
+        elapsed = time.perf_counter() - started
         result_path = directory / "workload_result.json"
         if proc.returncode == 0 and result_path.exists():
             result = json.loads(result_path.read_text(encoding="utf-8"))
             result["process_wall_seconds"] = None
-            return result
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "kind": "gridmind_workload_result",
-            "workload": name,
-            "status": "error",
-            "error": (proc.stderr.strip() or proc.stdout.strip()
-                      or f"child exited with {proc.returncode}"),
-            "returncode": proc.returncode,
-        }
+        else:
+            result = {
+                "schema_version": SCHEMA_VERSION,
+                "kind": "gridmind_workload_result",
+                "workload": name,
+                "status": "error",
+                "error": (proc.stderr.strip() or proc.stdout.strip()
+                          or f"child exited with {proc.returncode}"),
+                "returncode": proc.returncode,
+            }
+        progress(f"child {name} {label} completed in {elapsed:.3f}s "
+                 f"status={result.get('status')}")
+        return result
 
     workloads: dict[str, Any] = {}
-    for name in names:
-        warmups = [run_repetition(name, out / name / f"warmup-{index:02d}")
-                   for index in range(1, warmup_repetitions + 1)]
-        reps = [run_repetition(name, out / name / f"rep-{index:02d}")
-                for index in range(1, repetitions + 1)]
+    for name_index, name in enumerate(names, start=1):
+        progress(f"workload {name} ({name_index}/{len(names)}) starting")
+        label = "setup"
+        workload_started = time.perf_counter()
+        try:
+            warmups = []
+            for index in range(1, warmup_repetitions + 1):
+                label = f"warm-up {index}/{warmup_repetitions}"
+                progress(f"workload {name}: {label} starting")
+                warmups.append(run_repetition(
+                    name, out / name / f"warmup-{index:02d}", label))
+            reps = []
+            for index in range(1, repetitions + 1):
+                label = f"repetition {index}/{repetitions}"
+                progress(f"workload {name}: {label} starting")
+                reps.append(run_repetition(
+                    name, out / name / f"rep-{index:02d}", label))
+        except KeyboardInterrupt:
+            progress(f"interrupted during workload {name}: {label}")
+            raise
         workloads[name] = aggregate_repetitions(name, reps, warmups)
+        progress(f"workload {name} ({name_index}/{len(names)}) completed in "
+                 f"{time.perf_counter() - workload_started:.3f}s")
     finished_at_utc = _utc_now()
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -840,6 +872,7 @@ def measure(out_dir: str | Path, workload_names: Sequence[str] | None = None,
         "workloads": workloads,
     }
     _write_json(out / "measurements.json", payload)
+    progress(f"artifact written: {out / 'measurements.json'}")
     return payload
 
 
@@ -1041,8 +1074,9 @@ def _parse_names(value: str | None) -> list[str] | None:
 
 
 def _cmd_measure(args: argparse.Namespace) -> int:
+    progress = ProgressReporter(enabled=not args.quiet)
     payload = measure(args.out, _parse_names(args.workloads), args.repetitions,
-                      args.timeout, args.warmup)
+                      args.timeout, args.warmup, progress=progress)
     print(f"wrote {Path(args.out) / 'measurements.json'}")
     for name, record in payload["workloads"].items():
         wall = record.get("wall_seconds") or {}
@@ -1108,6 +1142,8 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="recorded warm-up children excluded from statistics")
     measure_parser.add_argument("--timeout", type=float, default=1800.0,
                                 help="per-child timeout in seconds")
+    measure_parser.add_argument("--quiet", action="store_true",
+                                help="suppress timestamped progress on stderr")
     measure_parser.set_defaults(func=_cmd_measure)
 
     baseline_parser = sub.add_parser("build-baseline", help="derive thresholds from measurements")

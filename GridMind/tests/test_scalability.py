@@ -1,10 +1,12 @@
 """Stage 5E scalability/memory guardrail classification."""
 from __future__ import annotations
 
+import io
 import os
 
 import pytest
 
+from benchmarks import progress
 from benchmarks import scalability as sc
 
 
@@ -100,3 +102,71 @@ def test_scalability_smoke_benchmark(tmp_path):
         leak_repetitions=2, leak_size=2)
     assert payload["summary"]["passed"] is True
     assert payload["leak"]["leak_suspected"] is False
+
+
+def _fake_worker(kind, size, repetitions, out_dir, timeout_seconds, probe_name=None):
+    return {
+        "schema_version": sc.SCALABILITY_SCHEMA_VERSION,
+        "kind": "gridmind_scalability_worker",
+        "workload": kind,
+        "size": int(size),
+        "repetitions": int(repetitions),
+        "status": "ok",
+        "started_at_utc": "2026-01-01T00:00:00Z",
+        "finished_at_utc": "2026-01-01T00:00:01Z",
+        "solver": "appsi_highs",
+        "solver_status": "optimal",
+        "solver_seconds": 0.05,
+        "objective_usd": 1.0,
+        "objectives_usd": [1.0],
+        "validation_passed": True,
+        "wall_seconds": 0.1,
+        "wall_samples_seconds": [0.1] * max(1, int(repetitions)),
+        "rss_samples_mb": [60.0] * max(2, int(repetitions)),
+        "peak_rss_mb": 60.0,
+        "error": None,
+    }
+
+
+def test_run_scalability_progress_reports_sizes_repetitions_and_artifact(
+        tmp_path, monkeypatch):
+    stream = io.StringIO()
+    reporter = progress.ProgressReporter(stream=stream)
+    monkeypatch.setattr(sc, "_run_child", _fake_worker)
+    payload = sc.run_scalability(
+        tmp_path / "run", lp_sizes=(4, 8), mip_sizes=(2, 4),
+        leak_repetitions=2, leak_size=2, repetitions=2, progress=reporter)
+    text = stream.getvalue()
+    for fragment in (
+            "scalability collection starting:",
+            "scalability family dispatch_lp:",
+            "scalability dispatch_lp size=4 repetition=1/2 starting",
+            "scalability dispatch_lp size=4 repetition=2/2 completed",
+            "scalability schedule_mip size=4 repetition=1/2 starting",
+            "scalability leak probe size=2 repetitions=2 starting",
+            "scalability leak probe size=2 repetitions=2 completed",
+            "artifact written:",
+            "scalability summary passed="):
+        assert fragment in text
+    assert payload["summary"]["passed"] is True
+    assert (tmp_path / "run" / "scalability.json").exists()
+
+
+def test_run_scalability_interruption_reports_size_and_writes_no_artifact(
+        tmp_path, monkeypatch):
+    stream = io.StringIO()
+    reporter = progress.ProgressReporter(stream=stream)
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sc, "_run_child", interrupted)
+    out = tmp_path / "run"
+    with pytest.raises(KeyboardInterrupt):
+        sc.run_scalability(out, lp_sizes=(4, 8), mip_sizes=(2, 4),
+                           leak_repetitions=2, leak_size=2, progress=reporter)
+    text = stream.getvalue()
+    assert "scalability dispatch_lp size=4 repetition=1/1 starting" in text
+    assert ("interrupted during scalability dispatch_lp size=4 repetition=1/1"
+            in text)
+    assert not (out / "scalability.json").exists()

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from benchmarks import schema, stats as robust_stats
+from benchmarks.progress import ProgressReporter
 from benchmarks.qualification import (
     ROOT,
     QualificationError,
@@ -318,9 +319,12 @@ def run_scalability(out_dir: str | Path, *,
                     max_rss_growth_mb: float = DEFAULT_MAX_RSS_GROWTH_MB,
                     max_rss_growth_factor: float = DEFAULT_MAX_RSS_GROWTH_FACTOR,
                     leak_tolerance_mb: float = DEFAULT_LEAK_TOLERANCE_MB,
-                    leak_tolerance_fraction: float = DEFAULT_LEAK_TOLERANCE_FRACTION
+                    leak_tolerance_fraction: float = DEFAULT_LEAK_TOLERANCE_FRACTION,
+                    progress: ProgressReporter | None = None
                     ) -> dict[str, Any]:
     out = Path(out_dir)
+    if progress is None:
+        progress = ProgressReporter()
     if out.exists():
         raise QualificationError(f"refusing to overwrite existing evidence directory: {out}")
     if not lp_sizes or not mip_sizes:
@@ -330,19 +334,35 @@ def run_scalability(out_dir: str | Path, *,
     if repetitions < 1:
         raise QualificationError("repetitions must be at least 1")
     out.mkdir(parents=True)
+    progress(f"scalability collection starting: out={out} lp_sizes={list(lp_sizes)} "
+             f"mip_sizes={list(mip_sizes)} repetitions={repetitions} "
+             f"leak_repetitions={leak_repetitions}")
     started_at_utc = _utc_now()
     environment = collect_environment()
     families: dict[str, Any] = {}
     all_checks: list[dict[str, Any]] = []
     for kind, sizes in (("dispatch_lp", lp_sizes), ("schedule_mip", mip_sizes)):
+        progress(f"scalability family {kind}: sizes={list(sizes)} "
+                 f"repetitions={repetitions}")
         runs = []
         for size in sizes:
             replicates = []
             for index in range(1, repetitions + 1):
                 probe_name = (f"{kind}-{size}" if repetitions == 1
                               else f"{kind}-{size}-rep-{index:02d}")
-                replicates.append(_run_child(kind, int(size), 1, out, timeout_seconds,
-                                             probe_name=probe_name))
+                label = f"size={int(size)} repetition={index}/{repetitions}"
+                progress(f"scalability {kind} {label} starting")
+                started = time.perf_counter()
+                try:
+                    replicate = _run_child(kind, int(size), 1, out, timeout_seconds,
+                                           probe_name=probe_name)
+                except KeyboardInterrupt:
+                    progress(f"interrupted during scalability {kind} {label}")
+                    raise
+                progress(f"scalability {kind} {label} completed in "
+                         f"{time.perf_counter() - started:.3f}s "
+                         f"status={replicate.get('status')}")
+                replicates.append(replicate)
             runs.append(combine_replicate_runs(kind, int(size), replicates))
         growth = assess_growth(runs, max_exponent=max_exponent,
                                max_rss_growth_mb=max_rss_growth_mb,
@@ -351,8 +371,20 @@ def run_scalability(out_dir: str | Path, *,
         all_checks.extend({"family": kind, **check} for check in growth["checks"])
 
     selected_leak_size = int(leak_size if leak_size is not None else mip_sizes[0])
-    leak_worker = _run_child("schedule_mip", selected_leak_size, int(leak_repetitions),
-                             out, timeout_seconds)
+    progress(f"scalability leak probe size={selected_leak_size} "
+             f"repetitions={leak_repetitions} starting")
+    started = time.perf_counter()
+    try:
+        leak_worker = _run_child("schedule_mip", selected_leak_size,
+                                 int(leak_repetitions), out, timeout_seconds)
+    except KeyboardInterrupt:
+        progress(f"interrupted during scalability leak probe size={selected_leak_size} "
+                 f"repetitions={leak_repetitions}")
+        raise
+    progress(f"scalability leak probe size={selected_leak_size} "
+             f"repetitions={leak_repetitions} completed in "
+             f"{time.perf_counter() - started:.3f}s "
+             f"status={leak_worker.get('status')}")
     leak = {"size": selected_leak_size, "repetitions": int(leak_repetitions),
             "worker": leak_worker, **assess_leak(
                 leak_worker, tolerance_mb=leak_tolerance_mb,
@@ -403,10 +435,14 @@ def run_scalability(out_dir: str | Path, *,
     if errors:
         raise QualificationError("invalid scalability artifact:\n- " + "\n- ".join(errors))
     _write_json(out / "scalability.json", payload)
+    progress(f"artifact written: {out / 'scalability.json'}")
+    progress(f"scalability summary passed={passed} "
+             f"failures={payload['summary']['failures']}/{payload['summary']['checks']}")
     return payload
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    progress = ProgressReporter(enabled=not args.quiet)
     payload = run_scalability(
         args.out,
         lp_sizes=args.lp_sizes, mip_sizes=args.mip_sizes,
@@ -416,7 +452,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         max_rss_growth_mb=args.max_rss_growth_mb,
         max_rss_growth_factor=args.max_rss_growth_factor,
         leak_tolerance_mb=args.leak_tolerance_mb,
-        leak_tolerance_fraction=args.leak_tolerance_fraction)
+        leak_tolerance_fraction=args.leak_tolerance_fraction,
+        progress=progress)
     print(f"wrote {Path(args.out) / 'scalability.json'}")
     for kind, family in payload["families"].items():
         for run in family["runs"]:
@@ -462,6 +499,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--leak-tolerance-mb", type=float, default=DEFAULT_LEAK_TOLERANCE_MB)
     run_parser.add_argument("--leak-tolerance-fraction", type=float,
                             default=DEFAULT_LEAK_TOLERANCE_FRACTION)
+    run_parser.add_argument("--quiet", action="store_true",
+                            help="suppress timestamped progress on stderr")
     run_parser.set_defaults(func=_cmd_run)
 
     worker_parser = sub.add_parser("_worker", help=argparse.SUPPRESS)

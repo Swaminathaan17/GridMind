@@ -1,11 +1,13 @@
 """Stage 5E E9 reliability pipeline: statistics, gates and artifact schema."""
 from __future__ import annotations
 
+import io
 import json
 import statistics
 
 import pytest
 
+from benchmarks import progress
 from benchmarks import qualification as q
 from benchmarks import reliability, schema
 
@@ -303,3 +305,96 @@ def test_statistical_artifact_rejects_inconsistent_methodology(tmp_path, monkeyp
     errors = schema.validate_statistical_artifact(payload)
     assert any("methodology.batches" in error for error in errors)
     assert any("categories" in error for error in errors)
+
+
+def test_run_reliability_progress_covers_batches_analysis_and_artifact(
+        tmp_path, monkeypatch):
+    stream = io.StringIO()
+    reporter = progress.ProgressReporter(stream=stream)
+    performance = [record["payload"] for record in
+                   _perf_records(batches=3, walls=(0.10, 0.11))]
+    scalability = [record["payload"] for record in
+                   _scal_records(batches=3, samples=2)]
+
+    def fake_measure(directory, workloads, repetitions, timeout_seconds, *,
+                     warmup_repetitions, progress=None):
+        assert progress is reporter
+        progress("workload smoke (1/1) starting")
+        return performance.pop(0)
+
+    def fake_scalability(directory, *, repetitions, timeout_seconds, progress=None):
+        assert progress is reporter
+        progress("scalability family dispatch_lp: sizes=[10, 40] repetitions=2")
+        return scalability.pop(0)
+
+    monkeypatch.setattr(reliability.q, "measure", fake_measure)
+    monkeypatch.setattr(reliability.sc, "run_scalability", fake_scalability)
+    payload = reliability.run_reliability(
+        tmp_path / "run", performance_workloads=("smoke",), batches=3,
+        repetitions=2, warmups=1, scalability_repetitions=2, progress=reporter)
+    text = stream.getvalue()
+    for fragment in (
+            "E9 reliability run starting:",
+            "performance batch 1/3 starting",
+            "performance batch 3/3 completed",
+            "scalability batch 1/3 starting",
+            "scalability batch 3/3 completed",
+            "statistical analysis starting: performance",
+            "statistical analysis completed: performance",
+            "statistical analysis starting: scalability",
+            "statistical analysis completed: scalability",
+            "artifact written:",
+            "acceptance passed=True"):
+        assert fragment in text
+    assert payload["acceptance"]["passed"] is True
+    assert (tmp_path / "run" / "reliability.json").exists()
+
+
+def test_run_reliability_interruption_reports_batch_and_writes_no_artifact(
+        tmp_path, monkeypatch):
+    stream = io.StringIO()
+    reporter = progress.ProgressReporter(stream=stream)
+
+    def interrupted(directory, workloads, repetitions, timeout_seconds, *,
+                    warmup_repetitions, progress=None):
+        progress("workload smoke (1/1) starting")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(reliability.q, "measure", interrupted)
+    out = tmp_path / "run"
+    with pytest.raises(KeyboardInterrupt):
+        reliability.run_reliability(
+            out, performance_workloads=("smoke",), batches=2, repetitions=2,
+            warmups=1, scalability_repetitions=2, progress=reporter)
+    text = stream.getvalue()
+    assert "performance batch 1/2 starting" in text
+    assert "interrupted during performance batch 1/2" in text
+    assert "E9 reliability run interrupted" in text
+    assert "artifact written:" not in text
+    assert not (out / "reliability.json").exists()
+
+
+def test_run_reliability_interruption_during_write_leaves_no_artifact(
+        tmp_path, monkeypatch):
+    stream = io.StringIO()
+    reporter = progress.ProgressReporter(stream=stream)
+    performance = _perf_records(batches=3, walls=(0.10, 0.11))
+    scalability = _scal_records(batches=3, samples=2)
+    monkeypatch.setattr(reliability, "collect_performance",
+                        lambda *args, **kwargs: performance)
+    monkeypatch.setattr(reliability, "collect_scalability",
+                        lambda *args, **kwargs: scalability)
+
+    def interrupted_write(path, payload):
+        path.write_text("partial", encoding="utf-8")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(reliability.q, "_write_json", interrupted_write)
+    out = tmp_path / "run"
+    with pytest.raises(KeyboardInterrupt):
+        reliability.run_reliability(
+            out, performance_workloads=("smoke",), batches=3, repetitions=2,
+            warmups=1, scalability_repetitions=2, progress=reporter)
+    assert not (out / "reliability.json").exists()
+    assert not (out / ".reliability.json.tmp").exists()
+    assert "interrupted while writing artifact" in stream.getvalue()

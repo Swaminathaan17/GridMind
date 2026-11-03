@@ -13,12 +13,14 @@ import argparse
 import json
 import math
 import sys
+import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from benchmarks import qualification as q
 from benchmarks import scalability as sc
 from benchmarks import schema, stats as robust_stats
+from benchmarks.progress import ProgressReporter
 
 STATISTICAL_KIND = schema.STATISTICAL_KIND
 STATISTICAL_SCHEMA_VERSION = schema.ARTIFACT_SCHEMA_VERSION
@@ -60,23 +62,48 @@ def _run_samples(run: Mapping[str, Any], samples_key: str, value_key: str) -> li
 
 def collect_performance(out: Path, workloads: Sequence[str], batches: int,
                         repetitions: int, warmups: int,
-                        timeout_seconds: float) -> list[dict[str, Any]]:
+                        timeout_seconds: float,
+                        progress: ProgressReporter | None = None
+                        ) -> list[dict[str, Any]]:
+    if progress is None:
+        progress = ProgressReporter()
     records = []
     for batch in range(1, batches + 1):
         directory = out / "performance" / f"batch-{batch:02d}"
-        payload = q.measure(directory, workloads, repetitions, timeout_seconds,
-                            warmup_repetitions=warmups)
+        progress(f"performance batch {batch}/{batches} starting: {directory}")
+        started = time.perf_counter()
+        try:
+            payload = q.measure(directory, workloads, repetitions, timeout_seconds,
+                                warmup_repetitions=warmups, progress=progress)
+        except KeyboardInterrupt:
+            progress(f"interrupted during performance batch {batch}/{batches}")
+            raise
+        progress(f"performance batch {batch}/{batches} completed in "
+                 f"{time.perf_counter() - started:.3f}s")
         records.append({"batch": batch, "path": _relative(directory), "payload": payload})
     return records
 
 
 def collect_scalability(out: Path, batches: int, repetitions: int,
-                        timeout_seconds: float) -> list[dict[str, Any]]:
+                        timeout_seconds: float,
+                        progress: ProgressReporter | None = None
+                        ) -> list[dict[str, Any]]:
+    if progress is None:
+        progress = ProgressReporter()
     records = []
     for batch in range(1, batches + 1):
         directory = out / "scalability" / f"batch-{batch:02d}"
-        payload = sc.run_scalability(directory, repetitions=repetitions,
-                                     timeout_seconds=timeout_seconds)
+        progress(f"scalability batch {batch}/{batches} starting: {directory}")
+        started = time.perf_counter()
+        try:
+            payload = sc.run_scalability(directory, repetitions=repetitions,
+                                         timeout_seconds=timeout_seconds,
+                                         progress=progress)
+        except KeyboardInterrupt:
+            progress(f"interrupted during scalability batch {batch}/{batches}")
+            raise
+        progress(f"scalability batch {batch}/{batches} completed in "
+                 f"{time.perf_counter() - started:.3f}s")
         records.append({"batch": batch, "path": _relative(directory), "payload": payload})
     return records
 
@@ -320,8 +347,11 @@ def run_reliability(out_dir: str | Path, *, baseline_path: str | Path | None = N
                     repetitions: int = DEFAULT_REPETITIONS,
                     warmups: int = DEFAULT_WARMUPS,
                     scalability_repetitions: int = DEFAULT_SCALABILITY_REPETITIONS,
-                    timeout_seconds: float = 1800.0) -> dict[str, Any]:
+                    timeout_seconds: float = 1800.0,
+                    progress: ProgressReporter | None = None) -> dict[str, Any]:
     out = Path(out_dir)
+    if progress is None:
+        progress = ProgressReporter()
     if out.exists():
         raise q.QualificationError(f"refusing to overwrite existing evidence directory: {out}")
     if batches < 2:
@@ -339,16 +369,32 @@ def run_reliability(out_dir: str | Path, *, baseline_path: str | Path | None = N
     if unknown:
         raise q.QualificationError(f"unknown baseline workloads: {unknown}")
     out.mkdir(parents=True)
+    progress(f"E9 reliability run starting: out={out} batches={batches} "
+             f"workloads={list(performance_workloads)} repetitions={repetitions} "
+             f"warmups={warmups} scalability_repetitions={scalability_repetitions}")
     started_at_utc = q._utc_now()
     environment = q.collect_environment()
-    performance_records = collect_performance(out, list(performance_workloads), batches,
-                                              repetitions, warmups, timeout_seconds)
-    scalability_records = collect_scalability(out, batches, scalability_repetitions,
-                                              timeout_seconds)
-    performance = analyze_performance(
-        performance_records, baseline, batches * repetitions)
-    scalability = analyze_scalability(
-        scalability_records, scalability_repetitions)
+    try:
+        performance_records = collect_performance(
+            out, list(performance_workloads), batches, repetitions, warmups,
+            timeout_seconds, progress=progress)
+        scalability_records = collect_scalability(
+            out, batches, scalability_repetitions, timeout_seconds, progress=progress)
+        progress("statistical analysis starting: performance")
+        analysis_started = time.perf_counter()
+        performance = analyze_performance(
+            performance_records, baseline, batches * repetitions)
+        progress("statistical analysis completed: performance in "
+                 f"{time.perf_counter() - analysis_started:.3f}s")
+        progress("statistical analysis starting: scalability")
+        analysis_started = time.perf_counter()
+        scalability = analyze_scalability(
+            scalability_records, scalability_repetitions)
+        progress("statistical analysis completed: scalability in "
+                 f"{time.perf_counter() - analysis_started:.3f}s")
+    except KeyboardInterrupt:
+        progress("E9 reliability run interrupted; no reliability.json artifact written")
+        raise
     checks = performance["checks"] + scalability["checks"]
     categories = {
         category: _all([check["passed"] for check in checks
@@ -422,17 +468,30 @@ def run_reliability(out_dir: str | Path, *, baseline_path: str | Path | None = N
     errors = schema.validate_statistical_artifact(payload)
     if errors:
         raise q.QualificationError("invalid statistical artifact:\n- " + "\n- ".join(errors))
-    q._write_json(out / "reliability.json", payload)
+    artifact = out / "reliability.json"
+    temporary = out / ".reliability.json.tmp"
+    try:
+        q._write_json(temporary, payload)
+        temporary.replace(artifact)
+    except KeyboardInterrupt:
+        temporary.unlink(missing_ok=True)
+        progress("E9 reliability run interrupted while writing artifact; "
+                 "no completed reliability.json was installed")
+        raise
+    progress(f"artifact written: {artifact}")
+    progress(f"acceptance passed={payload['acceptance']['passed']} "
+             f"categories={payload['acceptance']['categories']}")
     return payload
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    progress = ProgressReporter(enabled=not args.quiet)
     payload = run_reliability(
         args.out, baseline_path=args.baseline,
         performance_workloads=args.workloads, batches=args.batches,
         repetitions=args.repetitions, warmups=args.warmups,
         scalability_repetitions=args.scalability_repetitions,
-        timeout_seconds=args.timeout)
+        timeout_seconds=args.timeout, progress=progress)
     print(f"wrote {Path(args.out) / 'reliability.json'}")
     for name, workload in payload["performance"]["workloads"].items():
         wall = workload["summary"]["wall_seconds"]
@@ -461,6 +520,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--scalability-repetitions", type=int,
                             default=DEFAULT_SCALABILITY_REPETITIONS)
     run_parser.add_argument("--timeout", type=float, default=1800.0)
+    run_parser.add_argument("--quiet", action="store_true",
+                            help="suppress timestamped progress on stderr")
     run_parser.set_defaults(func=_cmd_run)
     return parser
 
