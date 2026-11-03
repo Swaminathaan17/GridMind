@@ -302,7 +302,7 @@ def test_measure_records_child_timeout_instead_of_crashing(tmp_path, monkeypatch
     def timed_out(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd="child", timeout=kwargs.get("timeout", 1))
 
-    monkeypatch.setattr(q.subprocess, "run", timed_out)
+    monkeypatch.setattr(q, "run_captured", timed_out)
     result = q.measure(tmp_path / "run", ["smoke"], repetitions=1, timeout_seconds=0.01)
     record = result["workloads"]["smoke"]
     assert record["status"] == "error"
@@ -313,7 +313,7 @@ def test_measure_records_child_start_failure_instead_of_crashing(tmp_path, monke
     def cannot_start(*args, **kwargs):
         raise OSError("executable vanished")
 
-    monkeypatch.setattr(q.subprocess, "run", cannot_start)
+    monkeypatch.setattr(q, "run_captured", cannot_start)
     result = q.measure(tmp_path / "run", ["smoke"], repetitions=1)
     record = result["workloads"]["smoke"]
     assert record["status"] == "error"
@@ -386,7 +386,7 @@ def test_measure_progress_is_timestamped_flushed_and_reports_repetitions(
         tmp_path, monkeypatch):
     stream = _RecordingStream()
     reporter = progress.ProgressReporter(stream=stream)
-    monkeypatch.setattr(q.subprocess, "run", _fake_successful_child)
+    monkeypatch.setattr(q, "run_captured", _fake_successful_child)
     result = q.measure(tmp_path / "run", ["smoke"], repetitions=2,
                        warmup_repetitions=1, progress=reporter)
     text = stream.getvalue()
@@ -415,7 +415,7 @@ def test_measure_progress_reports_interruption_without_completion_artifact(
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(q.subprocess, "run", interrupted)
+    monkeypatch.setattr(q, "run_captured", interrupted)
     out = tmp_path / "run"
     with pytest.raises(KeyboardInterrupt):
         q.measure(out, ["smoke"], repetitions=1, warmup_repetitions=1,
