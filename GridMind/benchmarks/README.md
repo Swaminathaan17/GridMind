@@ -1,3 +1,19 @@
+> **Final Stage 5E status (2026-11-03): ACCEPTED for the stated qualification
+> scope.** Clean E9 evidence is at
+> `benchmarks/runs/stage5e_e9_clean_20261103/reliability.json` (local/gitignored),
+> SHA-256
+> `20EBB33B32A4C2DAC8F11766FA2FA74991052E7D8C310C662270A1117D3FF201`.
+> It was generated from clean worktree commit
+> `10eded5c056c15b45c341a39c7f73b80fcdea2ed`; schema validation returned zero
+> errors, `dirty=false`, and all four acceptance categories passed. GitHub Actions
+> run `41623451166` passed Ubuntu and Windows for `10eded5`.
+>
+> The clean E9 environment had `appsi_highs` 1.15.1; GLPK/CBC were unavailable in
+> that worktree. Three-solver LP/MIP parity is separately documented by the E5
+> coverage artifact below. Raw E5/E9 JSON files remain local and gitignored.
+> Synthetic workload and reference-machine limitations still apply. See
+> [the final acceptance report](../STAGE5E_ACCEPTANCE_REPORT.md).
+
 # Stage 5E qualification harness
 
 This directory is separate from the `gridmind` runtime package. It runs existing
