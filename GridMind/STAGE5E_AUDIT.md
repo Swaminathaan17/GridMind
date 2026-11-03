@@ -344,3 +344,66 @@ clean-provenance requirement.
 explicitly authorised, regenerate the E9 artifact from the committed worktree, and
 rerun the acceptance review. E5 itself is closed; no further solver installation or
 parity claim is pending.
+
+
+---
+
+## Final clean-provenance review and decision (2026-11-03)
+
+This section supersedes earlier interim statements in this historical audit that
+Stage 5E was awaiting clean E9 evidence or final acceptance. Those statements
+accurately describe the state at the time they were written; the following
+verification closes that outstanding item.
+
+**Code commit under test:** `10eded5c056c15b45c341a39c7f73b80fcdea2ed`
+on `stage-5e-work-in-progress`.
+
+**Clean E9 artifact:** `benchmarks/runs/stage5e_e9_clean_20261103/reliability.json`
+(local and gitignored; not committed).
+
+- SHA-256:
+  `20EBB33B32A4C2DAC8F11766FA2FA74991052E7D8C310C662270A1117D3FF201`.
+- Generated in a detached clean worktree at the exact code commit above.
+- Provenance reports `dirty=false`; branch field is `HEAD` because the
+  evidence was generated from a detached worktree.
+- Schema validation: **0 errors**.
+- Acceptance: **passed**; functional, statistical, performance and scalability
+  categories all true.
+- Harness version: `5E.4`.
+- Solver inventory in this clean environment: `appsi_highs` 1.15.1 available
+  and MIP-capable; GLPK/CBC unavailable. Do not infer that all three solvers were
+  present in this E9 run. Their separate E5 coverage artifact is the evidence for
+  three-solver LP/MIP parity.
+
+E9 performance medians and conservative confidence-interval upper bounds (seconds):
+
+| Workload | n | Median | 95% CI upper |
+|---|---:|---:|---:|
+| smoke | 15 | 0.032682 | 0.033448 |
+| benchmark | 15 | 0.292812 | 0.295886 |
+| control_default | 15 | 1.926990 | 3.997402 |
+| mp_benchmark | 15 | 2.759205 | 4.979652 |
+
+Scalability time exponents and bootstrap 95% CI upper bounds:
+
+| Family | Exponent | CI upper |
+|---|---:|---:|
+| dispatch_lp | 0.030475 | 0.069264 |
+| schedule_mip | 0.080565 | 0.125312 |
+
+**CI verification:** GitHub Actions run
+`41623451166` passed both Ubuntu and Windows jobs for commit `10eded5`.
+This supersedes the earlier maintainer-reported/metadata-unavailable caveat for
+the prior `6ce5ee6` run.
+
+**Documentation changes:** The acceptance report, qualification status and
+benchmark harness README now state the final evidence and decision. This audit
+retains its chronological interim notes and explicitly supersedes their outdated
+pending-acceptance statements here.
+
+**Final decision: Stage 5E ACCEPTED for its stated reproducibility and
+qualification scope.** E1-E9 have supporting evidence. Limitations remain:
+benchmarks are synthetic and reference-machine-specific; E5 uses small harness
+LP/MIP probes; GLPK/CBC are optional external binaries; raw E5/E9 JSON artifacts
+are gitignored and remain local. No production-scale or cross-machine performance
+claim is made. Stage 5F is not part of this acceptance.
