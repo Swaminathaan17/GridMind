@@ -20,7 +20,7 @@
 |----------|------|--------------------|
 | Rev 1 | 2026-11-03 | Initial formulation and specification draft. |
 | Rev 2 | 2026-11-03 | Corrected tripped generator ramp exemption, Case 2 arithmetic, planning-stage battery SoC framing, and scope boundaries. |
-| Rev 3 | 2026-11-04 | **Objective function overhaul:** Reworked Section 6 to use an incremental corrective redispatch-cost formulation, eliminating full generation double-counting. Clarified equal contingency weighting as an optimization convention (not outage probabilities). Reaffirmed N-1 security as an independent feasibility requirement for every contingency regardless of weights. Synchronized cost decomposition, test cases, and completion report. |
+| Rev 3 | 2026-11-04 | **Objective function overhaul:** Reworked Section 6 to use an incremental corrective redispatch-cost formulation, eliminating full generation double-counting. Incremental contingency tiebreak accounting ensures identical contingency schedules incur exactly zero incremental cost. Clarified equal contingency weighting as an optimization convention (not outage probabilities). Reaffirmed N-1 security as an independent feasibility requirement for every contingency regardless of weights. Synchronized cost decomposition, test cases, and completion report. |
 
 ---
 
@@ -336,8 +336,8 @@ Under this formulation:
    - Contingency unmet-demand penalty: $\lambda \cdot u^k_{n,t}$ for any unserved energy.
    - Incremental battery throughput cost: $\kappa_b \cdot (dis^k_{b,t} - dis^0_{b,t})$,
      reflecting extra degradation caused by emergency discharge.
-   - Tiebreak regularization: $\varepsilon \cdot (ch^k_{b,t} + dis^k_{b,t})$ ensuring
-     numerical determinism and discouraging gratuitous cycling.
+   - Incremental tiebreak regularization: $\varepsilon \cdot \bigl[(ch^k_{b,t} + dis^k_{b,t}) - (ch^0_{b,t} + dis^0_{b,t})\bigr]$,
+     ensuring numerical determinism and discouraging gratuitous cycling without penalizing the baseline activity twice.
 
 ### 6.2 Preventive operating cost
 
@@ -353,10 +353,10 @@ This matches the existing `scheduling.py` objective exactly:
 
 For each contingency $k \in \mathcal{K}$, the corrective adjustment cost $\Delta C^k$ is:
 
-$$\Delta C^k = dt \left[ \sum_{g \in \mathcal{G}} \sum_{t \in \mathcal{T}} c_g \bigl(p^k_{g,t} - p^0_{g,t}\bigr) + \lambda \sum_{n \in \mathcal{N}} \sum_{t \in \mathcal{T}} u^k_{n,t} + \sum_{b \in \mathcal{B}} \sum_{t \in \mathcal{T}} \kappa_b \bigl(dis^k_{b,t} - dis^0_{b,t}\bigr) \right] + \varepsilon \cdot dt \sum_{b \in \mathcal{B}} \sum_{t \in \mathcal{T}} \bigl(ch^k_{b,t} + dis^k_{b,t}\bigr)$$
+$$\Delta C^k = dt \left[ \sum_{g \in \mathcal{G}} \sum_{t \in \mathcal{T}} c_g \bigl(p^k_{g,t} - p^0_{g,t}\bigr) + \lambda \sum_{n \in \mathcal{N}} \sum_{t \in \mathcal{T}} u^k_{n,t} + \sum_{b \in \mathcal{B}} \sum_{t \in \mathcal{T}} \kappa_b \bigl(dis^k_{b,t} - dis^0_{b,t}\bigr) \right] + \varepsilon \cdot dt \sum_{b \in \mathcal{B}} \sum_{t \in \mathcal{T}} \left[ \bigl(ch^k_{b,t} + dis^k_{b,t}\bigr) - \bigl(ch^0_{b,t} + dis^0_{b,t}\bigr) \right]$$
 
 Notice that:
-- When a contingency requires no change from the preventive plan (e.g. an unbinding line outage where flows naturally remain within limits), $p^k = p^0$, $dis^k = dis^0$, $u^k = 0$, so $\Delta C^k$ is zero (modulo tiebreak).
+- When a contingency requires no change from the preventive plan (e.g. an unbinding line outage where flows naturally remain within limits), $p^k = p^0$, $ch^k = ch^0$, $dis^k = dis^0$, $u^k = 0$, so $\Delta C^k$ evaluates exactly to zero, including the tiebreak contribution.
 - When a cheap generator $g_1$ trips and an expensive generator $g_2$ ramps up by $\Delta p$ to compensate, the term evaluates to $-c_{g_1} p^0_{g_1,t} + c_{g_2} \Delta p$, which exactly equals the net fuel cost difference of the outage response.
 - Full base generation is never charged twice.
 
@@ -423,7 +423,7 @@ the exact decomposition:
 | `corrective_redispatch_cost_usd` | $\frac{1}{|\mathcal{K}|} \sum_k dt \sum_{g,t} c_g (p^k_{g,t} - p^0_{g,t})$ | USD |
 | `contingency_unmet_penalty_usd` | $\frac{1}{|\mathcal{K}|} \sum_k dt \cdot \lambda \sum_{n,t} u^k_{n,t}$ | USD |
 | `corrective_battery_throughput_usd` | $\frac{1}{|\mathcal{K}|} \sum_k dt \sum_{b,t} \kappa_b (dis^k_{b,t} - dis^0_{b,t})$ | USD |
-| `contingency_tiebreak_usd` | $\frac{1}{|\mathcal{K}|} \sum_k \varepsilon \cdot dt \sum_{b,t}(ch^k_{b,t} + dis^k_{b,t})$ | USD |
+| `contingency_tiebreak_usd` | $\frac{1}{|\mathcal{K}|} \sum_k \varepsilon \cdot dt \sum_{b,t}\left[(ch^k_{b,t} + dis^k_{b,t}) - (ch^0_{b,t} + dis^0_{b,t})\right]$ | USD |
 | `contingency_cost_usd` | Sum of above four ($\Delta C^{cont}$) | USD |
 | `total_objective_usd` | Solver objective value ($C^{prev} + \Delta C^{cont}$) | USD |
 | `n1_secure` | `True` iff independent verifier confirms $u^k_{n,t} \leq \text{tol}$ for all $n, t, k$ | bool |
@@ -920,7 +920,7 @@ strictly additive.
 | R1 | Corrective ramp | Failed generator is **exempt** from corrective ramp; surviving generators respect $|p^k_{g,t} - p^0_{g,t}| \leq$ ramp limits. |
 | R2 | Hand calculations | Fully verified arithmetic; Case 2 confirmed **not N-1 secure** (20 MW shortfall). |
 | R3 | Battery SoC framing | Clearly specified as a **planning-stage joint optimization from shared initial state ($E^0_b$)**. Mid-trajectory operational fault modeling is explicitly out of scope. |
-| R4 | **Objective formulation** | **Incremental corrective redispatch-cost formulation adopted.** Preventive stage bears base cost $C^{prev}$. Contingency recourse bears incremental generator redispatch $c_g(p^k - p^0)$, incremental battery throughput $\kappa_b(dis^k - dis^0)$, unmet penalty $\lambda u^k$, and tiebreak. Eliminates double-counting of base generation. |
+| R4 | **Objective formulation** | **Incremental corrective redispatch-cost formulation adopted.** Preventive stage bears base cost $C^{prev}$. Contingency recourse bears incremental generator redispatch $c_g(p^k - p^0)$, incremental battery throughput $\kappa_b(dis^k - dis^0)$, unmet penalty $\lambda u^k$, and incremental tiebreak $\varepsilon\left[(ch^k+dis^k)-(ch^0+dis^0)\right]$. Eliminates double-counting of base generation and ensures identical contingency trajectories evaluate to zero incremental cost. |
 | R5 | **Contingency weighting** | Clarified as an **optimization convention** ($w_k = 1/|\mathcal{K}|$), not real-world outage probabilities. |
 | R6 | **N-1 security assessment** | Feasibility requirement enforced across **every** contingency independently; completely decoupled from objective weights. |
 | R7 | API consistency | Mapped directly to existing parameters across `network.py`, `multiperiod.py`, `scheduling.py`, and `validation.py`. |
