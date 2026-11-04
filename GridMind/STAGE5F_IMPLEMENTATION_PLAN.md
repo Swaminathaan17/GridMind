@@ -109,12 +109,28 @@ class SCPSProblem:
     """Security-Constrained Preventive Scheduling Problem definition."""
     problem: ScheduleProblem               # Base multi-period problem
     contingency_set: ContingencySet        # Selected N-1 contingencies
-    contingency_weights: Mapping[str, float] | None = None  # None -> equal weights (1/|K|)
     notes: str = ""
 
     def validate(self) -> None:
-        ...
+        """Validate base problem and contingency set.
+
+        Rejects an empty contingency set when N-1 security assessment is requested.
+        Weights are fixed to 1 / len(contingency_set.contingencies) as an internal
+        optimization convention in accordance with Stage 5F.1 specifications.
+        """
+        self.problem.validate()
+        self.contingency_set.validate(self.problem.network)
+        if len(self.contingency_set.contingencies) == 0:
+            raise ValueError("SCPSProblem requires a non-empty contingency_set for N-1 security assessment")
 ```
+
+> [!NOTE]
+> **Equal Weighting Scope Decision:**
+> Configurable custom contingency weights are intentionally omitted from `SCPSProblem`.
+> In accordance with `STAGE5F_SPEC.md` Section 6.4, equal weighting $w_k = 1 / |\mathcal{K}|$
+> is applied as a scale-invariant optimization convention rather than empirical outage probabilities.
+> Independent N-1 feasibility verification remains strictly decoupled from these weights. Rejecting
+> empty contingency sets ensures that an N-1 assessment cannot vacuously succeed without evaluating any outages.
 
 ### 3.2 Optimization Result Structure (`gridmind/security.py`)
 
@@ -279,8 +295,9 @@ flowchart TD
    - *Risk:* Increases branch-and-bound tree size linearly with $|\mathcal{K}|$.
    - *Mitigation:* Maintain default `battery_mode="lp"`; verify MIP performance on standard 8-node test network during 5F.5.
 
-3. **Decoupling Feasibility from Objective Value:**
+3. **Decoupling Feasibility from Objective Value & Empty Contingency Set Policy:**
    - *Decision:* The result property `n1_secure` is populated strictly by the verifier (`all(c.n1_secure for c in contingency_results)`), never inferred directly from Pyomo's `TerminationCondition.optimal`.
+   - *Decision:* Custom contingency weights are omitted from `SCPSProblem` in favor of uniform $1 / |\mathcal{K}|$ scaling. Empty contingency sets are rejected by `SCPSProblem.validate()` to guarantee that an N-1 assessment cannot vacuously pass without evaluating contingencies. This is a deliberate initial scope boundary, not a mathematical divergence.
 
 ---
 
