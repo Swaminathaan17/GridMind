@@ -1,10 +1,10 @@
 # Stage 5F — Security-Constrained Preventive Scheduling
-## Mathematical Specification (Milestone 5F.1) — Revision 2
+## Mathematical Specification (Milestone 5F.1) — Revision 3
 
 **Branch:** `stage-5f-work-in-progress`  
 **Originally prepared:** 2026-11-03  
-**Revised:** 2026-11-03 (Revision 2 — post-review corrections)  
-**Status:** REVISED DRAFT — awaiting review before 5F.2 begins  
+**Revised:** 2026-11-04 (Revision 3 — objective function consistency & incremental redispatch)  
+**Status:** FINAL REVISED SPECIFICATION — awaiting review before 5F.2 begins  
 **Depends on:** Stage 5E (accepted 2026-11-03)
 
 ---
@@ -14,18 +14,13 @@
 > source code is modified in this milestone. All decisions documented here are
 > subject to review before 5F.2 begins.
 
-### Revision 2 change log
+### Revision history
 
-| Issue | Change |
-|-------|--------|
-| R1 | Corrective ramp constraints now explicitly **exempt the tripped generator**. A generator trip is instantaneous; ramp limits apply only to surviving generators. |
-| R2 | Case 2 hand-calculation corrected. Original erroneously claimed N-1 secure. Correct result: **not N-1 secure**, 20 MW unmet at B per period. Full workings provided. |
-| R3 | Battery SoC interpretation clarified. The independent-initial-SoC design is a **planning-stage joint optimisation**, not a model of an outage occurring mid-trajectory. The distinction is stated explicitly. |
-| R4 | Objective function section rewritten. Equal contingency weighting decision stated. Tiebreak term added to corrective cost for API consistency. Corrective generation cost inclusion rationale strengthened. Double-counting analysis added. |
-| R5 | All equations verified against `network.py`, `multiperiod.py`, `scheduling.py`, and `validation.py`. No invented parameters. |
-| R6 | All four hand-calculated test cases corrected with independent arithmetic. Cases 3 and 4 redesigned for numerical clarity. |
-| R7 | Baseline test section replaced with **actual recorded results** from this machine. Fabricated placeholder text removed. |
-| R8 | New Section 13 added: explicit statement distinguishing transportation-flow security assessment from real electrical grid N-1 security. |
+| Revision | Date | Summary of changes |
+|----------|------|--------------------|
+| Rev 1 | 2026-11-03 | Initial formulation and specification draft. |
+| Rev 2 | 2026-11-03 | Corrected tripped generator ramp exemption, Case 2 arithmetic, planning-stage battery SoC framing, and scope boundaries. |
+| Rev 3 | 2026-11-04 | **Objective function overhaul:** Reworked Section 6 to use an incremental corrective redispatch-cost formulation, eliminating full generation double-counting. Clarified equal contingency weighting as an optimization convention (not outage probabilities). Reaffirmed N-1 security as an independent feasibility requirement for every contingency regardless of weights. Synchronized cost decomposition, test cases, and completion report. |
 
 ---
 
@@ -316,7 +311,35 @@ itself enforces the non-anticipativity of the preventive plan.
 
 ## 6. Objective function
 
-### 6.1 Preventive operating cost
+### 6.1 Mathematical and economic rationale
+
+In a security-constrained preventive scheduling framework, the base operating
+point is planned to run under normal conditions, incurring base operating cost.
+Contingencies are low-probability hypothetical disturbances: if contingency $k$
+materializes, the system transitions from preventive dispatch $p^0$ to
+corrective dispatch $p^k$.
+
+Charging the full operating cost $\sum c_g p^k_{g,t}$ for every contingency
+on top of the preventive cost $C^{prev}$ would economically double-count base energy
+production (effectively paying multiple times for serving the same MWh of demand).
+Instead, Stage 5F models the contingency recourse via an **incremental corrective
+redispatch-cost formulation**.
+
+Under this formulation:
+1. **Preventive stage** carries the full base operating cost of serving normal demand.
+2. **Contingency stage** carries the **incremental operating cost** of corrective
+   adjustments relative to the preventive baseline:
+   - Incremental generator redispatch cost: $c_g \cdot (p^k_{g,t} - p^0_{g,t})$. Note
+     that for generators ramped down (or tripped), this delta is negative (saving fuel),
+     while for replacement generators ramped up, the delta is positive. Total net energy
+     remains aligned with demand.
+   - Contingency unmet-demand penalty: $\lambda \cdot u^k_{n,t}$ for any unserved energy.
+   - Incremental battery throughput cost: $\kappa_b \cdot (dis^k_{b,t} - dis^0_{b,t})$,
+     reflecting extra degradation caused by emergency discharge.
+   - Tiebreak regularization: $\varepsilon \cdot (ch^k_{b,t} + dis^k_{b,t})$ ensuring
+     numerical determinism and discouraging gratuitous cycling.
+
+### 6.2 Preventive operating cost
 
 $$C^{prev} = dt \left[\sum_{g \in \mathcal{G}} \sum_{t \in \mathcal{T}} c_g\, p^0_{g,t} + \lambda \sum_{n \in \mathcal{N}} \sum_{t \in \mathcal{T}} u^0_{n,t} + \sum_{b \in \mathcal{B}} \sum_{t \in \mathcal{T}} \kappa_b\, dis^0_{b,t}\right] + \varepsilon \cdot dt \sum_{b \in \mathcal{B}} \sum_{t \in \mathcal{T}} \bigl(ch^0_{b,t} + dis^0_{b,t}\bigr)$$
 
@@ -326,73 +349,85 @@ This matches the existing `scheduling.py` objective exactly:
 - $dt \sum_{b,t} \kappa_b dis^0_{b,t}$: battery throughput cost (`throughput_cost_per_mwh`).
 - $\varepsilon \cdot dt \sum_{b,t}(ch^0_{b,t} + dis^0_{b,t})$: tiebreak (`tiebreak_epsilon`).
 
-### 6.2 Contingency cost (penalized mode)
+### 6.3 Contingency corrective recourse cost
 
-For each contingency $k$, the corrective operating cost is:
+For each contingency $k \in \mathcal{K}$, the corrective adjustment cost $\Delta C^k$ is:
 
-$$C^k = dt \left[\sum_{g \in \mathcal{G}} \sum_{t \in \mathcal{T}} c_g\, p^k_{g,t} + \lambda \sum_{n \in \mathcal{N}} \sum_{t \in \mathcal{T}} u^k_{n,t} + \sum_{b \in \mathcal{B}} \sum_{t \in \mathcal{T}} \kappa_b\, dis^k_{b,t}\right] + \varepsilon \cdot dt \sum_{b \in \mathcal{B}} \sum_{t \in \mathcal{T}} \bigl(ch^k_{b,t} + dis^k_{b,t}\bigr)$$
+$$\Delta C^k = dt \left[ \sum_{g \in \mathcal{G}} \sum_{t \in \mathcal{T}} c_g \bigl(p^k_{g,t} - p^0_{g,t}\bigr) + \lambda \sum_{n \in \mathcal{N}} \sum_{t \in \mathcal{T}} u^k_{n,t} + \sum_{b \in \mathcal{B}} \sum_{t \in \mathcal{T}} \kappa_b \bigl(dis^k_{b,t} - dis^0_{b,t}\bigr) \right] + \varepsilon \cdot dt \sum_{b \in \mathcal{B}} \sum_{t \in \mathcal{T}} \bigl(ch^k_{b,t} + dis^k_{b,t}\bigr)$$
 
-The tiebreak $\varepsilon$ term is included for API and convention consistency
-with the preventive model.
+Notice that:
+- When a contingency requires no change from the preventive plan (e.g. an unbinding line outage where flows naturally remain within limits), $p^k = p^0$, $dis^k = dis^0$, $u^k = 0$, so $\Delta C^k$ is zero (modulo tiebreak).
+- When a cheap generator $g_1$ trips and an expensive generator $g_2$ ramps up by $\Delta p$ to compensate, the term evaluates to $-c_{g_1} p^0_{g_1,t} + c_{g_2} \Delta p$, which exactly equals the net fuel cost difference of the outage response.
+- Full base generation is never charged twice.
 
-**Equal contingency weighting (R4 decision).** Stage 5F assigns equal
-probability to every contingency. With $|\mathcal{K}|$ contingencies the
-aggregate contingency cost is:
+### 6.4 Contingency weighting as an optimization convention
 
-$$C^{cont} = \frac{1}{|\mathcal{K}|} \sum_{k \in \mathcal{K}} C^k$$
+In the penalized objective, the aggregate corrective cost is:
 
-**Rationale for equal weights:** The N-1 security standard requires the system
-to withstand any single credible contingency, not a probability-weighted subset.
-Equal weighting is the direct expression of this standard.  
-**Implications of equal weighting:** Every contingency, regardless of its
-probability of occurrence, contributes equally to the objective. This means a
-rare but easily-corrected contingency has the same objective weight as a
-frequent, hard-to-recover one. If users have contingency probability estimates
-they may substitute explicit weights $\pi_k \geq 0$ with $\sum_k \pi_k = 1$;
-the formulation supports this without changing any constraint. For Stage 5F the
-default is equal weights.
+$$\Delta C^{cont} = \sum_{k \in \mathcal{K}} w_k \cdot \Delta C^k$$
 
-**No double-counting.** The preventive variables ($p^0_{g,t}$) and
-corrective variables ($p^k_{g,t}$) are distinct. $C^{prev}$ sums over $p^0$
-only; $C^{cont}$ sums over $p^k$ only. These are separate sets of decision
-variables. No cost component appears in both.
-
-### 6.3 Total objective
-
-$$\min \quad C^{prev} + C^{cont}$$
-
-### 6.4 Strict security mode
-
-In strict mode, unmet demand is forced to zero in both stages:
-$u^0_{n,t} = 0$ and $u^k_{n,t} = 0$ for all $n, t, k$.
-
-The unmet-demand penalty terms vanish from both $C^{prev}$ and $C^{cont}$.
-If the monolithic model is infeasible under these constraints, the system is
-reported as **not N-1 secure** and no schedule is returned.
+where $w_k = \frac{1}{|\mathcal{K}|}$ by default.
 
 > [!IMPORTANT]
-> **N-1 security is not assessed from the objective value.** An optimal solver
-> status in penalized mode does not mean the system is N-1 secure. Security is
-> assessed by the independent verifier checking $u^k_{n,t} \leq \text{tol}$
-> for every $n, t, k$. The `n1_secure` field in the result is set by the
-> verifier, not by the solver.
+> **Equal weighting is an optimization convention, not an outage probability distribution.**  
+> Real-world component failure rates are non-uniform and orders of magnitude
+> smaller than $1/|\mathcal{K}|$. The equal weighting $w_k = 1/|\mathcal{K}|$ is
+> chosen strictly as a scale-invariant optimization convention so that:
+> 1. Adding contingencies does not artificially inflate the penalty scale relative to $C^{prev}$.
+> 2. Every contingency is treated with equal priority by the optimizer when balancing trade-offs in penalized mode.
+>
+> If actual failure probabilities $\pi_k$ ($\sum \pi_k \ll 1$) are available, they
+> can be supplied as custom weights $w_k$; the mathematical formulation remains
+> unchanged.
 
-### 6.5 Cost decomposition reported to callers
+### 6.5 Total objective function
 
-| Field | Definition |
-|-------|-----------|
-| `preventive_generation_cost_usd` | $dt \sum_{g,t} c_g p^0_{g,t}$ |
-| `preventive_unmet_penalty_usd` | $dt \cdot \lambda \sum_{n,t} u^0_{n,t}$ |
-| `preventive_battery_throughput_usd` | $dt \sum_{b,t} \kappa_b dis^0_{b,t}$ |
-| `preventive_tiebreak_usd` | $\varepsilon \cdot dt \sum_{b,t}(ch^0_{b,t} + dis^0_{b,t})$ |
-| `preventive_operating_cost_usd` | Sum of above four |
-| `contingency_generation_cost_usd` | $\frac{1}{|\mathcal{K}|} \sum_k dt \sum_{g,t} c_g p^k_{g,t}$ |
-| `contingency_unmet_penalty_usd` | $\frac{1}{|\mathcal{K}|} \sum_k dt \cdot \lambda \sum_{n,t} u^k_{n,t}$ |
-| `contingency_battery_throughput_usd` | $\frac{1}{|\mathcal{K}|} \sum_k dt \sum_{b,t} \kappa_b dis^k_{b,t}$ |
-| `contingency_tiebreak_usd` | $\frac{1}{|\mathcal{K}|} \sum_k \varepsilon \cdot dt \sum_{b,t}(ch^k_{b,t} + dis^k_{b,t})$ |
-| `total_objective_usd` | Solver objective value ($C^{prev} + C^{cont}$) |
-| `n1_secure` | `True` iff verifier confirms $u^k_{n,t} \leq \text{tol}$ for all $n, t, k$ |
-| `per_contingency` | List of per-contingency unmet energy and cost |
+$$\min \quad C^{prev} + \Delta C^{cont}$$
+
+Expanding both parts:
+
+$$\min \quad C^{prev} + \frac{1}{|\mathcal{K}|} \sum_{k \in \mathcal{K}} \Delta C^k$$
+
+### 6.6 Strict security mode
+
+In **strict security mode**, unmet demand is forbidden across all stages:
+$$u^0_{n,t} = 0 \quad \forall n \in \mathcal{N},\; t \in \mathcal{T}$$
+$$u^k_{n,t} = 0 \quad \forall n \in \mathcal{N},\; t \in \mathcal{T},\; k \in \mathcal{K}$$
+
+Under strict mode, the unmet demand terms vanish. The optimization minimizes base
+preventive cost plus average incremental redispatch cost across all N-1 contingencies,
+subject to zero unserved demand in every contingency.
+
+If the monolithic model is infeasible under strict mode, the solver reports infeasibility,
+and the system is reported as **not N-1 secure**.
+
+> [!IMPORTANT]
+> **N-1 security is an independent feasibility requirement, not an objective value.**  
+> A system is N-1 secure if and only if **every** selected contingency $k \in \mathcal{K}$
+> satisfies $u^k_{n,t} \leq \text{tol}$ for all $n, t$.  
+> Objective weights $w_k$ only affect trade-offs in penalized mode when the system is
+> capacity-short; they have zero bearing on the definition or assessment of N-1 security.
+
+### 6.7 Cost decomposition reported to callers
+
+To ensure transparency and independent verification, the result structure reports
+the exact decomposition:
+
+| Field | Definition | Units |
+|-------|-----------|-------|
+| `preventive_generation_cost_usd` | $dt \sum_{g,t} c_g p^0_{g,t}$ | USD |
+| `preventive_unmet_penalty_usd` | $dt \cdot \lambda \sum_{n,t} u^0_{n,t}$ | USD |
+| `preventive_battery_throughput_usd` | $dt \sum_{b,t} \kappa_b dis^0_{b,t}$ | USD |
+| `preventive_tiebreak_usd` | $\varepsilon \cdot dt \sum_{b,t}(ch^0_{b,t} + dis^0_{b,t})$ | USD |
+| `preventive_operating_cost_usd` | Sum of above four ($C^{prev}$) | USD |
+| `corrective_redispatch_cost_usd` | $\frac{1}{|\mathcal{K}|} \sum_k dt \sum_{g,t} c_g (p^k_{g,t} - p^0_{g,t})$ | USD |
+| `contingency_unmet_penalty_usd` | $\frac{1}{|\mathcal{K}|} \sum_k dt \cdot \lambda \sum_{n,t} u^k_{n,t}$ | USD |
+| `corrective_battery_throughput_usd` | $\frac{1}{|\mathcal{K}|} \sum_k dt \sum_{b,t} \kappa_b (dis^k_{b,t} - dis^0_{b,t})$ | USD |
+| `contingency_tiebreak_usd` | $\frac{1}{|\mathcal{K}|} \sum_k \varepsilon \cdot dt \sum_{b,t}(ch^k_{b,t} + dis^k_{b,t})$ | USD |
+| `contingency_cost_usd` | Sum of above four ($\Delta C^{cont}$) | USD |
+| `total_objective_usd` | Solver objective value ($C^{prev} + \Delta C^{cont}$) | USD |
+| `n1_secure` | `True` iff independent verifier confirms $u^k_{n,t} \leq \text{tol}$ for all $n, t, k$ | bool |
+| `per_contingency` | Per-contingency breakdown (contingency ID, status, unmet MWh, redispatch cost) | list |
 
 ---
 
@@ -408,25 +443,30 @@ The system is declared **N-1 secure** if and only if:
 
 Condition 1 alone is insufficient. The independent verifier (Section 8) must
 pass. Solver termination status `optimal` is not equivalent to N-1 security.
+Crucially, N-1 security is an **independent feasibility requirement** across
+every selected contingency, completely independent of the objective function value
+or weights $w_k$.
 
 ### 7.2 N-1 security (penalized mode)
 
 A contingency $k$ is **individually secure** if the verifier confirms
 $u^k_{n,t} \leq \text{tol}$ for all $n, t$.
 
-The system is **fully N-1 secure** only if every contingency is individually
-secure. Even one insecure contingency makes the system not N-1 secure. The
-`n1_secure` field is `False` if any contingency fails.
+The system is **fully N-1 secure** if and only if **every** contingency in $\mathcal{K}$ is
+individually secure. Even one insecure contingency makes the system not N-1 secure.
+The `n1_secure` field is `False` if any contingency fails, regardless of how small
+its unmet energy or objective impact might be.
 
 ### 7.3 Partial security reporting
 
 In penalized mode, the result distinguishes:
 - Contingencies that are individually secure (zero unmet demand after correction).
-- Contingencies with residual unmet demand and its magnitude.
+- Contingencies with residual unmet demand and their specific magnitude.
 - The total unmet energy summed across all contingencies and all periods.
+- The corrective redispatch cost $\Delta C^k$ incurred to respond to each contingency.
 
-This allows callers to identify which specific contingency is problematic,
-rather than receiving only a pass/fail.
+This allows operators and analysts to identify which specific contingency is
+problematic, rather than receiving only a binary pass/fail.
 
 ---
 
@@ -549,16 +589,26 @@ This is a planning-stage approximation. Confirmed for Stage 5F.
 ### 9.3 Implementation strategy
 
 Monolithic Pyomo model: one set of preventive variables, one set of corrective
-variables per contingency, all constraints in one model, one solver call.
-Simple to implement and audit. May be slow for large $|\mathcal{K}|$. 
-Decomposition is deferred to a later stage.
+recourse variables per contingency, coupled through corrective ramp constraints
+and the incremental redispatch objective, all in one model and one solver call.
+This guarantees joint optimality between preventive dispatch and all contingency
+responses. Simple to implement and audit. Decomposition is deferred to a later stage
+if benchmark scalability requires it.
 
-### 9.4 Contingency scope
+### 9.4 Contingency weighting and probability interpretation
+
+As defined in Section 6.4, equal contingency weights $w_k = 1/|\mathcal{K}|$ are
+adopted as an internal optimization scaling convention to avoid objective dilution
+or inflation across contingency sets of different sizes. They are **not** real-world
+contingency probabilities. N-1 feasibility is verified on a strict per-contingency basis
+and is completely immune to objective weighting conventions.
+
+### 9.5 Contingency scope
 
 N-1 only: exactly one component fails at a time. N-2 and cascading failures
 are explicitly out of scope for Stage 5F.
 
-### 9.5 Battery exclusivity in MIP mode
+### 9.6 Battery exclusivity in MIP mode
 
 When `battery_mode="exclusive"`, binary variables $z^k_{b,t}$ must be added
 per contingency. This increases MIP size as $O(|\mathcal{K}|)$. LP relaxation
@@ -835,6 +885,10 @@ assessments.
    $O(|\mathcal{K}| \cdot T \cdot (|\mathcal{G}| + |\mathcal{L}| + |\mathcal{B}|))$.
 7. **MIP size in exclusive mode.** Binary variables scale with
    $|\mathcal{K}| \cdot |\mathcal{B}| \cdot T$.
+8. **Contingency weighting vs. stochastic expectations.** Equal contingency weights
+   $w_k = 1/|\mathcal{K}|$ are a deterministic optimization convention, not an
+   empirical outage risk model. N-1 security is enforced strictly per-contingency,
+   not statistically.
 
 ---
 
@@ -853,24 +907,24 @@ strictly additive.
 
 ---
 
-## Stage 5F.1 Completion Report (Revision 2)
+## Stage 5F.1 Completion Report (Revision 3)
 
-**Deliverable:** This revised specification document (`STAGE5F_SPEC.md`).
+**Deliverable:** This final revised specification document (`STAGE5F_SPEC.md`).
 
 **Production files changed:** None.
 
-**Decisions changed in Revision 2:**
+**Summary of decisions and formulation changes in Revision 3:**
 
-| # | Original | Revised |
-|---|----------|---------|
-| R1 — Corrective ramp | Applied to all generators including the tripped one | Tripped generator is **exempt** from corrective ramp; constraint applies only to surviving generators |
-| R2 — Case 2 outcome | Incorrectly stated N-1 secure | Corrected to **NOT secure**, 20 MW shortfall at B, with full arithmetic workings |
-| R3 — Battery SoC framing | Described as "operational interpretation (N-1 is checked at the planning stage, not a sequential fault at t=5)" without distinguishing what it does not model | Now explicitly states this is a **planning-stage joint optimisation from shared initial conditions** and clearly states what it does NOT model (mid-trajectory fault) |
-| R4 — Objective weighting | $1/\|\mathcal{K}\|$ stated but not justified; no decision on probabilities; tiebreak omitted from corrective cost | Equal-weight decision confirmed and justified; implications of equal weighting stated; tiebreak added to corrective cost for consistency; no-double-counting shown explicitly |
-| R5 — API verification | Parameters listed without source references | All parameters now linked to their exact source field in existing data classes |
-| R6 — Test cases | Cases 3 and 4 had imprecise network parameters; Case 4 was under-specified | All cases redesigned with fully specified networks, step-by-step arithmetic, and unambiguous expected outcomes |
-| R7 — Test baseline | Placeholder text "See test run results appended below" with no actual results | Replaced with actual recorded results |
-| R8 — Scope boundary | Limitations section existed but no explicit statement distinguishing transportation-flow from electrical security | New Section 13 added with explicit scope boundary |
+| # | Topic | Decision & Formulation |
+|---|-------|------------------------|
+| R1 | Corrective ramp | Failed generator is **exempt** from corrective ramp; surviving generators respect $|p^k_{g,t} - p^0_{g,t}| \leq$ ramp limits. |
+| R2 | Hand calculations | Fully verified arithmetic; Case 2 confirmed **not N-1 secure** (20 MW shortfall). |
+| R3 | Battery SoC framing | Clearly specified as a **planning-stage joint optimization from shared initial state ($E^0_b$)**. Mid-trajectory operational fault modeling is explicitly out of scope. |
+| R4 | **Objective formulation** | **Incremental corrective redispatch-cost formulation adopted.** Preventive stage bears base cost $C^{prev}$. Contingency recourse bears incremental generator redispatch $c_g(p^k - p^0)$, incremental battery throughput $\kappa_b(dis^k - dis^0)$, unmet penalty $\lambda u^k$, and tiebreak. Eliminates double-counting of base generation. |
+| R5 | **Contingency weighting** | Clarified as an **optimization convention** ($w_k = 1/|\mathcal{K}|$), not real-world outage probabilities. |
+| R6 | **N-1 security assessment** | Feasibility requirement enforced across **every** contingency independently; completely decoupled from objective weights. |
+| R7 | API consistency | Mapped directly to existing parameters across `network.py`, `multiperiod.py`, `scheduling.py`, and `validation.py`. |
+| R8 | Physical vs abstraction scope | Explicit boundary separating transportation-flow feasibility from electrical AC/DC physics. |
 
 **Baseline test results (recorded 2026-11-03, this machine):**
 
@@ -892,16 +946,6 @@ offsets: An Application Control policy has blocked this file.
 This is a pre-existing machine-level AppLocker constraint.
 No GridMind source file was modified.
 ```
-
-**Open questions resolved:**
-- Corrective ramp for tripped generator: **Resolved — tripped generator is exempt.**
-- Battery SoC design: **Resolved — planning-stage joint optimisation from shared initial state; mid-trajectory fault is out of scope.**
-- Objective weighting: **Resolved — equal weights (1/|K|) confirmed; explicit probabilities deferred.**
-- Corrective generation cost: **Resolved — included, with tiebreak, for consistency.**
-- Double-counting: **Resolved — none; preventive and corrective variables are distinct.**
-
-**Remaining open question for review:**
-- Exclusive-mode MIP: add binaries per contingency, or LP-relax corrective sub-problems?
 
 **Next step:** 5F.2 — Contingency representation.  
 **Do not proceed without explicit review approval.**
