@@ -110,6 +110,15 @@ class ScenarioSet:
     def __post_init__(self) -> None:
         if not self.scenarios:
             raise ValueError("scenario set must contain at least one scenario")
+        seen_ids: set[str] = set()
+        duplicate_ids: set[str] = set()
+        for scenario in self.scenarios:
+            if scenario.id in seen_ids:
+                duplicate_ids.add(scenario.id)
+            else:
+                seen_ids.add(scenario.id)
+        if duplicate_ids:
+            raise ValueError(f"scenario IDs must be unique; duplicates: {sorted(duplicate_ids)}")
         validate_probabilities([s.probability for s in self.scenarios])
         periods = self.scenarios[0].periods
         for s in self.scenarios:
