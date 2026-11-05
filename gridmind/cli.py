@@ -433,7 +433,7 @@ def cmd_uncertainty(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="gridmind", description="GridMind: LP dispatch optimiser for a SIMULATED network (research prototype).")
+    p = argparse.ArgumentParser(prog="gridmind", description="GridMind: energy-grid optimisation and operational resilience engine.")
     p.add_argument("--version", action="version", version=f"gridmind {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -441,7 +441,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--network", help="network JSON (default: data/sample_network.json)")
         sp.add_argument("--penalty", type=float, help="unmet-demand penalty, USD/MWh (default from network file)")
 
-    sub.add_parser("check-solver", help="verify Pyomo + GLPK are usable").set_defaults(func=cmd_check_solver)
+    sub.add_parser("check-solver", help="verify available optimisation solvers and capabilities").set_defaults(func=cmd_check_solver)
     sub.add_parser("scenarios", help="list built-in scenarios").set_defaults(func=cmd_scenarios)
 
     sp = sub.add_parser("solve", help="solve one scenario"); common(sp)

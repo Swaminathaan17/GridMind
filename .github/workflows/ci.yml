@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+        python-version:
+          - "3.11"
+    defaults:
+      run:
+        working-directory: GridMind
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements-lock.txt
+
+      - name: Install package without re-resolving dependencies
+        run: python -m pip install -e . --no-deps
+
+      - name: Run full test suite
+        run: python -m pytest -q
+
+      - name: Verify solver discovery
+        run: python -m gridmind check-solver
+
+      - name: Validate committed qualification baseline
+        run: python -m benchmarks.qualification validate-baseline --baseline benchmarks/baseline.json
+
+      - name: Generate qualification manifest (smoke)
+        run: >-
+          python -m benchmarks.qualification measure
+          --out benchmarks/runs/ci-${{ github.run_id }}
+          --workloads smoke
+          --repetitions 2
+
+      - name: Gate smoke reproducibility against committed baseline
+        run: >-
+          python -m benchmarks.qualification gate
+          --measurements benchmarks/runs/ci-${{ github.run_id }}/measurements.json
+          --baseline benchmarks/baseline.json
+          --workloads smoke
+          --reproducibility-only

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gridmind"
+dynamic = ["version"]
+description = "Research LP prototype for least-cost dispatch on a simulated electricity network"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyomo>=6.7",
+    "highspy>=1.5",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.11",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "matplotlib>=3.8",
+]
+
+[project.scripts]
+gridmind = "gridmind.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "gridmind.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["gridmind*"]

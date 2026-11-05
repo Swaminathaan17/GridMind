@@ -36,7 +36,8 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from gridmind.multiperiod import ScheduleProblem
-from gridmind.solver import SolverUnavailableError, resolve_solver, solver_name
+from gridmind.provenance import ExecutionMetadata, capture_execution_metadata, sanitize_for_serialization
+from gridmind.solver import SolverOptions, SolverUnavailableError, map_termination_status, resolve_solver, solver_name
 from gridmind.validation import ValidationReport, recompute_schedule_costs, validate_schedule
 
 CLEAN_EPS = 1e-9
@@ -85,17 +86,19 @@ class ScheduleResult:
     validation: ValidationReport | None = None
     strict: bool = False
     battery_mode: str = "lp"     # "lp" (continuous) or "exclusive" (MIP)
+    metadata: ExecutionMetadata | None = None
 
     @property
     def ok(self) -> bool:
         return self.status == "optimal" and (self.validation is None or self.validation.passed)
 
     def to_dict(self) -> dict[str, Any]:
-        d = {k: v for k, v in vars(self).items() if k != "validation"}
+        d = {k: v for k, v in vars(self).items() if k not in ("validation", "metadata")}
         d["max_unmet_periods"] = list(self.max_unmet_periods)
         d["validation"] = self.validation.to_dict() if self.validation else None
+        d["metadata"] = self.metadata.to_dict() if self.metadata else None
         d["ok"] = self.ok
-        return d
+        return sanitize_for_serialization(d)
 
 
 # ----------------------------------------------------------------- model ----
@@ -252,16 +255,18 @@ def _clean(x: float) -> float:
 
 
 def _failure(status: str, solver: str, term: str, msg: str, runtime: float,
-             problem: ScheduleProblem, strict: bool, battery_mode: str = "lp") -> ScheduleResult:
+             problem: ScheduleProblem, strict: bool, battery_mode: str = "lp",
+             metadata: ExecutionMetadata | None = None) -> ScheduleResult:
     return ScheduleResult(status=status, solver=solver, termination_condition=term, message=msg,
                           runtime_seconds=runtime, periods=problem.periods,
                           step_hours=problem.step_hours, total_demand_mwh=problem.total_demand_mwh,
-                          strict=strict, battery_mode=battery_mode)
+                          strict=strict, battery_mode=battery_mode, metadata=metadata)
 
 
 def solve_schedule(problem: ScheduleProblem, *, allow_unmet: bool = True,
                    validate: bool = True, battery_mode: str = "lp",
-                   fixed_battery_mw: Mapping[str, float] | None = None) -> ScheduleResult:
+                   fixed_battery_mw: Mapping[str, float] | None = None,
+                   options: SolverOptions | None = None) -> ScheduleResult:
     """Build, solve and independently validate a multi-period problem.
 
     ``battery_mode`` is ``"lp"`` (default, continuous relaxation) or
@@ -272,7 +277,10 @@ def solve_schedule(problem: ScheduleProblem, *, allow_unmet: bool = True,
     battery as a constant nodal injection; see :func:`build_schedule_model`. The
     independent validator only knows the battery decision variables, so callers
     that use a fixed injection must pass ``validate=False`` and validate the
-    *executed* trajectory separately (the controller does exactly this)."""
+    *executed* trajectory separately (the controller does exactly this).
+
+    ``options`` (optional) applies structured execution options (time limit,
+    mip gap, threads) to the resolved solver instance."""
     strict = not allow_unmet
     try:
         battery_mode = normalize_battery_mode(battery_mode)
@@ -281,10 +289,12 @@ def solve_schedule(problem: ScheduleProblem, *, allow_unmet: bool = True,
 
     mip = battery_mode == "exclusive"
     try:
-        name, solver = resolve_solver(mip=mip)
+        name, solver = resolve_solver(mip=mip, options=options) if options is not None else resolve_solver(mip=mip)
     except SolverUnavailableError as exc:
         return _failure("solver_unavailable", solver_name(), "not_run", str(exc), 0.0, problem, strict,
                         battery_mode)
+
+    meta = capture_execution_metadata(solver, name, problem, options=options)
 
     import pyomo.environ as pyo
     from pyomo.opt import SolverStatus, TerminationCondition
@@ -294,28 +304,28 @@ def solve_schedule(problem: ScheduleProblem, *, allow_unmet: bool = True,
                                      fixed_battery_mw=fixed_battery_mw)
     except ValueError as exc:
         return _failure("error", name, "model_build_failed", f"invalid schedule problem: {exc}",
-                        0.0, problem, strict, battery_mode)
+                        0.0, problem, strict, battery_mode, metadata=meta)
 
     t0 = time.perf_counter()
     try:
         results = solver.solve(model, load_solutions=False, tee=False)
-    except Exception as exc:
+    except Exception as exc:  # solver crash, bad executable, parse failure ...
         return _failure("error", name, "solver_exception", f"{type(exc).__name__}: {exc}",
-                        time.perf_counter() - t0, problem, strict, battery_mode)
+                        time.perf_counter() - t0, problem, strict, battery_mode, metadata=meta)
     runtime = time.perf_counter() - t0
 
     term = results.solver.termination_condition
     term_s = str(term)
     if term != TerminationCondition.optimal or results.solver.status not in (SolverStatus.ok, SolverStatus.warning):
-        status = {TerminationCondition.infeasible: "infeasible",
-                  TerminationCondition.unbounded: "unbounded",
-                  TerminationCondition.infeasibleOrUnbounded: "infeasible_or_unbounded"}.get(term, "error")
+        status = map_termination_status(term, default="error")
         msg = {"infeasible": "model is infeasible: no schedule satisfies all constraints "
                              "(check ramps, outages and terminal SoC requirements)",
-               "unbounded": "model is unbounded (check data)"}.get(
+               "unbounded": "model is unbounded (check data)",
+               "time_limit": f"solver reached time limit (termination={term_s})",
+               "interrupted": f"solver execution interrupted (termination={term_s})",
+               "solver_error": f"solver error encountered (termination={term_s})"}.get(
             status, f"solver did not reach optimality (status={results.solver.status}, termination={term_s})")
-        return _failure(status, name, term_s, msg, runtime, problem, strict, battery_mode)
-
+        return _failure(status, name, term_s, msg, runtime, problem, strict, battery_mode, metadata=meta)
     T = list(range(problem.periods))
     try:
         model.solutions.load_from(results)
@@ -332,7 +342,7 @@ def solve_schedule(problem: ScheduleProblem, *, allow_unmet: bool = True,
             raise ValueError("solver reported optimal but returned no values")
     except Exception as exc:
         return _failure("error", name, term_s, f"could not read solution: {exc}", runtime, problem, strict,
-                        battery_mode)
+                        battery_mode, metadata=meta)
 
     dispatch = {g: [_clean(v) for v in series] for g, series in dispatch.items()}
     flows = {l: [_clean(v) for v in series] for l, series in flows.items()}
@@ -378,4 +388,5 @@ def solve_schedule(problem: ScheduleProblem, *, allow_unmet: bool = True,
         dispatch=dispatch, flows=flows, unmet=unmet, served=served,
         charge=charge, discharge=discharge, soc=soc,
         cost_by_period_usd=[_clean(c) for c in per_period_cost],
-        validation=report, strict=strict, battery_mode=battery_mode)
+        validation=report, strict=strict, battery_mode=battery_mode,
+        metadata=meta)

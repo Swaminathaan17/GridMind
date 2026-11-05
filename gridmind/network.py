@@ -7,6 +7,7 @@ generator cost in USD/MWh. Every optimisation covers one interval of
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -122,6 +123,29 @@ class Network:
             raise ValueError("node demand must be non-negative")
         if self.unmet_penalty_per_mwh < 0 or self.interval_hours <= 0:
             raise ValueError("penalty must be >= 0 and interval_hours > 0")
+        # --- finite-value guards (NaN / Inf are not caught by < or <=) ---
+        if not math.isfinite(self.unmet_penalty_per_mwh):
+            raise ValueError("unmet_penalty_per_mwh must be finite")
+        if not math.isfinite(self.interval_hours):
+            raise ValueError("interval_hours must be finite")
+        for n in self.nodes:
+            if not math.isfinite(n.demand_mw):
+                raise ValueError(f"node {n.id} demand_mw must be finite, got {n.demand_mw}")
+        for g in self.generators:
+            if not math.isfinite(g.capacity_mw):
+                raise ValueError(f"generator {g.id} capacity_mw must be finite, got {g.capacity_mw}")
+            if not math.isfinite(g.cost_per_mwh):
+                raise ValueError(f"generator {g.id} cost_per_mwh must be finite, got {g.cost_per_mwh}")
+            if g.availability_mw is not None and not math.isfinite(g.availability_mw):
+                raise ValueError(f"generator {g.id} availability_mw must be finite, got {g.availability_mw}")
+            if g.ramp_up_mw is not None and not math.isfinite(g.ramp_up_mw):
+                raise ValueError(f"generator {g.id} ramp_up_mw must be finite, got {g.ramp_up_mw}")
+            if g.ramp_down_mw is not None and not math.isfinite(g.ramp_down_mw):
+                raise ValueError(f"generator {g.id} ramp_down_mw must be finite, got {g.ramp_down_mw}")
+        for ln in self.lines:
+            if not math.isfinite(ln.capacity_mw):
+                raise ValueError(f"line {ln.id} capacity_mw must be finite, got {ln.capacity_mw}")
+
 
     # ---- (de)serialisation ----------------------------------------------
     def to_dict(self) -> dict[str, Any]:
