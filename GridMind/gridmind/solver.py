@@ -18,8 +18,10 @@ machines without a GLPK binary.
 """
 from __future__ import annotations
 
+import math
 import os
 import shutil
+from dataclasses import dataclass
 from typing import Any
 
 ENV_SOLVER = "GRIDMIND_SOLVER"            # explicit solver name (disables fallback)
@@ -41,6 +43,136 @@ _FILE_SOLVERS = frozenset({"glpk", "cbc"})
 
 #: private per-process cache of (ok, reason) empirical MIP probe outcomes
 _MIP_PROBE_CACHE: dict[object, tuple[bool, str]] = {}
+
+
+@dataclass(frozen=True)
+class SolverOptions:
+    """Structured, solver-agnostic execution options.
+
+    Attributes:
+        time_limit_seconds: Maximum wall-clock time in seconds for the solver run.
+        mip_gap: Target relative MIP optimality gap (e.g. 0.01 for 1%).
+        threads: Number of worker threads for parallel solver execution.
+    """
+    time_limit_seconds: float | None = None
+    mip_gap: float | None = None
+    threads: int | None = None
+
+    def validate(self) -> None:
+        """Validate options sanity; raises ValueError on invalid parameters."""
+        if self.time_limit_seconds is not None:
+            if not math.isfinite(self.time_limit_seconds) or self.time_limit_seconds <= 0:
+                raise ValueError(
+                    f"time_limit_seconds must be a positive finite float, got {self.time_limit_seconds}"
+                )
+        if self.mip_gap is not None:
+            if not math.isfinite(self.mip_gap) or self.mip_gap < 0:
+                raise ValueError(
+                    f"mip_gap must be a non-negative finite float, got {self.mip_gap}"
+                )
+        if self.threads is not None:
+            if isinstance(self.threads, bool) or not isinstance(self.threads, int) or self.threads < 1:
+                raise ValueError(
+                    f"threads must be a positive integer, got {self.threads}"
+                )
+
+
+def apply_solver_options(solver: Any, name: str, options: SolverOptions | None) -> None:
+    """Apply structured SolverOptions to a Pyomo solver instance.
+
+    Translates standardized option fields to solver-specific parameter names
+    without raising unexpected attribute/key errors.
+    """
+    if options is None:
+        return
+    options.validate()
+    sname = (name or "").lower()
+
+    if "highs" in sname:
+        if options.time_limit_seconds is not None:
+            val = float(options.time_limit_seconds)
+            if hasattr(solver, "highs_options"):
+                solver.highs_options["time_limit"] = val
+            if hasattr(solver, "options"):
+                solver.options["time_limit"] = val
+        if options.mip_gap is not None:
+            val = float(options.mip_gap)
+            if hasattr(solver, "highs_options"):
+                solver.highs_options["mip_rel_gap"] = val
+            if hasattr(solver, "options"):
+                solver.options["mip_rel_gap"] = val
+        if options.threads is not None:
+            val = int(options.threads)
+            try:
+                import highspy
+                if hasattr(highspy.Highs, "resetGlobalScheduler"):
+                    highspy.Highs.resetGlobalScheduler(1)
+            except Exception:
+                pass
+            if hasattr(solver, "highs_options"):
+                solver.highs_options["threads"] = val
+            if hasattr(solver, "options"):
+                solver.options["threads"] = val
+    elif "glpk" in sname:
+        if hasattr(solver, "options"):
+            if options.time_limit_seconds is not None:
+                solver.options["tmlim"] = int(math.ceil(options.time_limit_seconds))
+            if options.mip_gap is not None:
+                solver.options["mipgap"] = float(options.mip_gap)
+    elif "cbc" in sname:
+        if hasattr(solver, "options"):
+            if options.time_limit_seconds is not None:
+                solver.options["sec"] = float(options.time_limit_seconds)
+            if options.mip_gap is not None:
+                solver.options["ratio"] = float(options.mip_gap)
+            if options.threads is not None:
+                solver.options["threads"] = int(options.threads)
+
+
+def map_termination_status(term: Any, default: str = "error") -> str:
+    """Map Pyomo TerminationCondition enums and string representations to GridMind status strings."""
+    try:
+        from pyomo.opt import TerminationCondition
+        enum_map: dict[Any, str] = {
+            TerminationCondition.optimal: "optimal",
+            TerminationCondition.globallyOptimal: "optimal",
+            TerminationCondition.locallyOptimal: "optimal",
+            TerminationCondition.infeasible: "infeasible",
+            TerminationCondition.unbounded: "unbounded",
+            TerminationCondition.infeasibleOrUnbounded: "infeasible_or_unbounded",
+            TerminationCondition.maxTimeLimit: "time_limit",
+            TerminationCondition.resourceInterrupt: "resource_limit",
+            TerminationCondition.userInterrupt: "interrupted",
+            TerminationCondition.licensingProblems: "solver_error",
+            TerminationCondition.internalSolverError: "solver_error",
+            TerminationCondition.solverFailure: "solver_error",
+            TerminationCondition.invalidProblem: "error",
+            TerminationCondition.noSolution: "no_solution",
+            TerminationCondition.intermediateNonInteger: "intermediate_non_integer",
+        }
+        if term in enum_map:
+            return enum_map[term]
+    except ImportError:
+        pass
+
+    str_map: dict[str, str] = {
+        "optimal": "optimal",
+        "globallyOptimal": "optimal",
+        "locallyOptimal": "optimal",
+        "infeasible": "infeasible",
+        "unbounded": "unbounded",
+        "infeasibleOrUnbounded": "infeasible_or_unbounded",
+        "maxTimeLimit": "time_limit",
+        "resourceInterrupt": "resource_limit",
+        "userInterrupt": "interrupted",
+        "licensingProblems": "solver_error",
+        "internalSolverError": "solver_error",
+        "solverFailure": "solver_error",
+        "invalidProblem": "error",
+        "noSolution": "no_solution",
+        "intermediateNonInteger": "intermediate_non_integer",
+    }
+    return str_map.get(str(term), default)
 
 class SolverUnavailableError(RuntimeError):
     """Pyomo missing, or the configured solver executable cannot be found."""
@@ -218,7 +350,8 @@ def _probe_mip(name: str) -> tuple[bool, str]:
     return result
 
 
-def make_solver(name: str | None = None, mip: bool = False) -> Any:
+def make_solver(name: str | None = None, mip: bool = False,
+                options: SolverOptions | None = None) -> Any:
     """Create a configured Pyomo solver.
 
     ``name`` given           -> exactly that solver, or SolverUnavailableError.
@@ -229,19 +362,28 @@ def make_solver(name: str | None = None, mip: bool = False) -> Any:
     ``mip=True`` additionally requires the solver to pass the empirical binary
     probe; an explicitly named/env solver that fails the probe raises rather
     than silently falling back.
+
+    ``options`` (optional) applies structured execution options (time limit,
+    mip gap, threads) to the resolved solver instance.
     """
     explicit = name or explicit_solver_name()
     if explicit:
         if mip:
-            return _verified_mip_solver(explicit)
-        return _make(explicit)
+            s = _verified_mip_solver(explicit)
+        else:
+            s = _make(explicit)
+        apply_solver_options(s, explicit, options)
+        return s
     candidates = MIP_SOLVER_CANDIDATES if mip else SOLVER_CANDIDATES
     tried: list[str] = []
     for candidate in candidates:
         try:
             if mip:
-                return _verified_mip_solver(candidate)
-            return _make(candidate)
+                s = _verified_mip_solver(candidate)
+            else:
+                s = _make(candidate)
+            apply_solver_options(s, candidate, options)
+            return s
         except SolverUnavailableError:
             tried.append(candidate)
     label = "MIP solver" if mip else "LP solver"
@@ -261,7 +403,8 @@ def _verified_mip_solver(name: str) -> Any:
     return solver
 
 
-def resolve_solver(mip: bool = False) -> tuple[str, Any]:
+def resolve_solver(mip: bool = False,
+                   options: SolverOptions | None = None) -> tuple[str, Any]:
     """Return ``(name, solver)`` actually usable on this machine.
 
     Explicit configuration never falls back: if GRIDMIND_SOLVER or
@@ -270,29 +413,43 @@ def resolve_solver(mip: bool = False) -> tuple[str, Any]:
 
     ``mip=True`` restricts resolution to solvers that pass the empirical binary
     probe; an explicitly selected solver that fails the probe raises rather than
-    falling back to a different (LP) solver."""
+    falling back to a different (LP) solver.
+
+    ``options`` (optional) applies structured execution options (time limit,
+    mip gap, threads) to the resolved solver instance.
+    """
     explicit = explicit_solver_name()
     if explicit:
         if mip:
-            return explicit, _verified_mip_solver(explicit)
-        return explicit, _make(explicit)
+            s = _verified_mip_solver(explicit)
+        else:
+            s = _make(explicit)
+        apply_solver_options(s, explicit, options)
+        return explicit, s
     if os.environ.get(ENV_SOLVER_PATH):
         name = DEFAULT_SOLVER  # an explicit executable implies the default file solver
         if mip:
-            return name, _verified_mip_solver(name)
-        return name, _make(name)
+            s = _verified_mip_solver(name)
+        else:
+            s = _make(name)
+        apply_solver_options(s, name, options)
+        return name, s
     if mip:
         errors: list[str] = []
         for candidate in MIP_SOLVER_CANDIDATES:
             try:
-                return candidate, _verified_mip_solver(candidate)
+                s = _verified_mip_solver(candidate)
+                apply_solver_options(s, candidate, options)
+                return candidate, s
             except SolverUnavailableError as exc:
                 errors.append(f"{candidate}: {exc}")
         raise SolverUnavailableError("no MIP-capable solver available; " + " | ".join(errors))
     errors = []
     for candidate in SOLVER_CANDIDATES:
         try:
-            return candidate, _make(candidate)
+            s = _make(candidate)
+            apply_solver_options(s, candidate, options)
+            return candidate, s
         except SolverUnavailableError as exc:
             errors.append(f"{candidate}: {exc}")
     raise SolverUnavailableError("no LP solver available; " + " | ".join(errors))

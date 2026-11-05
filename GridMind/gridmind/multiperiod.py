@@ -71,6 +71,19 @@ class Battery:
             raise ValueError(f"battery {self.id}: initial SoC outside [min_soc, capacity]")
         if self.final_soc_mwh is not None and not (self.min_soc_mwh <= self.final_soc_mwh <= self.capacity_mwh):
             raise ValueError(f"battery {self.id}: final SoC outside [min_soc, capacity]")
+        # --- finite-value guards (NaN / Inf bypass < and <= comparisons) ---
+        for _attr, _val in [
+            ("capacity_mwh", self.capacity_mwh),
+            ("max_charge_mw", self.max_charge_mw),
+            ("max_discharge_mw", self.max_discharge_mw),
+            ("initial_soc_mwh", self.initial_soc_mwh),
+            ("throughput_cost_per_mwh", self.throughput_cost_per_mwh),
+        ]:
+            if not math.isfinite(_val):
+                raise ValueError(f"battery {self.id} {_attr} must be finite, got {_val}")
+        if self.final_soc_mwh is not None and not math.isfinite(self.final_soc_mwh):
+            raise ValueError(f"battery {self.id} final_soc_mwh must be finite, got {self.final_soc_mwh}")
+
 
     def to_dict(self) -> dict[str, Any]:
         return vars(self).copy()

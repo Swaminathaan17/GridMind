@@ -11,8 +11,9 @@ from typing import Any, Mapping
 
 from gridmind.network import Network
 from gridmind.multiperiod import ScheduleProblem
+from gridmind.provenance import ExecutionMetadata, capture_execution_metadata, sanitize_for_serialization
 from gridmind.scheduling import ScheduleResult, normalize_battery_mode
-from gridmind.solver import SolverUnavailableError, resolve_solver, solver_name
+from gridmind.solver import SolverOptions, SolverUnavailableError, map_termination_status, resolve_solver, solver_name
 
 CONTINGENCY_KINDS: tuple[str, ...] = ("generator", "line")
 CLEAN_EPS = 1e-9
@@ -301,18 +302,20 @@ class SCPSResult:
     preventive_result: ScheduleResult | None = None
     contingencies: dict[str, ContingencySchedule] = field(default_factory=dict)
     validation: Any = None              # SCPSVerificationReport deferred to 5F.4
+    metadata: ExecutionMetadata | None = None
 
     @property
     def ok(self) -> bool:
         return self.status == "optimal" and (self.validation is None or getattr(self.validation, "passed", True))
 
     def to_dict(self) -> dict[str, Any]:
-        d = {k: v for k, v in vars(self).items() if k not in ("preventive_result", "contingencies", "validation")}
+        d = {k: v for k, v in vars(self).items() if k not in ("preventive_result", "contingencies", "validation", "metadata")}
         d["preventive_result"] = self.preventive_result.to_dict() if self.preventive_result else None
         d["contingencies"] = {k: v.to_dict() for k, v in self.contingencies.items()}
         d["validation"] = self.validation.to_dict() if self.validation and hasattr(self.validation, "to_dict") else None
+        d["metadata"] = self.metadata.to_dict() if self.metadata else None
         d["ok"] = self.ok
-        return d
+        return sanitize_for_serialization(d)
 
 
 # ----------------------------------------------------------------- model construction ----
@@ -564,12 +567,13 @@ def build_scps_model(scps_problem: SCPSProblem, *, allow_unmet: bool = True, bat
 # ----------------------------------------------------------------- solver execution ----
 def _scps_failure(
     status: str, solver: str, term: str, msg: str, runtime: float,
-    scps_problem: SCPSProblem, strict: bool, battery_mode: str = "lp"
+    scps_problem: SCPSProblem, strict: bool, battery_mode: str = "lp",
+    metadata: ExecutionMetadata | None = None
 ) -> SCPSResult:
     return SCPSResult(
         status=status, solver=solver, termination_condition=term, message=msg,
         runtime_seconds=runtime, periods=scps_problem.periods, step_hours=scps_problem.step_hours,
-        n1_secure=False, strict=strict, battery_mode=battery_mode
+        n1_secure=False, strict=strict, battery_mode=battery_mode, metadata=metadata
     )
 
 
@@ -578,12 +582,14 @@ def solve_security_constrained(
     *,
     allow_unmet: bool = True,
     battery_mode: str = "lp",
+    options: SolverOptions | None = None,
 ) -> SCPSResult:
     """Build and solve the monolithic Security-Constrained Preventive Scheduling problem.
 
     Supports:
     - ``allow_unmet=True`` (penalized mode) vs ``allow_unmet=False`` (strict security mode).
     - ``battery_mode="lp"`` (continuous relaxation) vs ``"exclusive"`` (MIP exclusivity).
+    - ``options`` (optional) structured SolverOptions (time limit, gap, threads).
     """
     strict = not allow_unmet
     try:
@@ -593,9 +599,11 @@ def solve_security_constrained(
 
     mip = battery_mode == "exclusive"
     try:
-        name, solver = resolve_solver(mip=mip)
+        name, solver = resolve_solver(mip=mip, options=options) if options is not None else resolve_solver(mip=mip)
     except SolverUnavailableError as exc:
         return _scps_failure("solver_unavailable", solver_name(), "not_run", str(exc), 0.0, scps_problem, strict, battery_mode)
+
+    meta = capture_execution_metadata(solver, name, scps_problem, options=options)
 
     import pyomo.environ as pyo
     from pyomo.opt import SolverStatus, TerminationCondition
@@ -603,29 +611,27 @@ def solve_security_constrained(
     try:
         model = build_scps_model(scps_problem, allow_unmet=allow_unmet, battery_mode=battery_mode)
     except ValueError as exc:
-        return _scps_failure("error", name, "model_build_failed", f"invalid SCPS problem: {exc}", 0.0, scps_problem, strict, battery_mode)
+        return _scps_failure("error", name, "model_build_failed", f"invalid SCPS problem: {exc}", 0.0, scps_problem, strict, battery_mode, metadata=meta)
 
     t0 = time.perf_counter()
     try:
         results = solver.solve(model, load_solutions=False, tee=False)
-    except Exception as exc:
-        return _scps_failure("error", name, "solver_exception", f"{type(exc).__name__}: {exc}", time.perf_counter() - t0, scps_problem, strict, battery_mode)
+    except Exception as exc:  # solver crash, bad executable, parse failure ...
+        return _scps_failure("error", name, "solver_exception", f"{type(exc).__name__}: {exc}", time.perf_counter() - t0, scps_problem, strict, battery_mode, metadata=meta)
     runtime = time.perf_counter() - t0
 
     term = results.solver.termination_condition
     term_s = str(term)
     if term != TerminationCondition.optimal or results.solver.status not in (SolverStatus.ok, SolverStatus.warning):
-        status = {
-            TerminationCondition.infeasible: "infeasible",
-            TerminationCondition.unbounded: "unbounded",
-            TerminationCondition.infeasibleOrUnbounded: "infeasible_or_unbounded",
-        }.get(term, "error")
+        status = map_termination_status(term, default="error")
         msg = {
             "infeasible": "SCPS model is infeasible: no joint schedule satisfies all preventive and contingency constraints",
             "unbounded": "SCPS model is unbounded (check network and contingency data)",
+            "time_limit": f"solver reached time limit (termination={term_s})",
+            "interrupted": f"solver execution interrupted (termination={term_s})",
+            "solver_error": f"solver error encountered (termination={term_s})",
         }.get(status, f"solver did not reach optimality (status={results.solver.status}, termination={term_s})")
-        return _scps_failure(status, name, term_s, msg, runtime, scps_problem, strict, battery_mode)
-
+        return _scps_failure(status, name, term_s, msg, runtime, scps_problem, strict, battery_mode, metadata=meta)
     T = list(range(scps_problem.periods))
     net = scps_problem.network
     dt = scps_problem.step_hours
@@ -718,7 +724,8 @@ def solve_security_constrained(
         max_unmet_mw=_clean(max_p_unmet), max_unmet_periods=max_p_periods,
         dispatch=p_disp, flows=p_flows, unmet=p_unmet, served=p_served,
         charge=p_charge, discharge=p_dis, soc=p_soc,
-        cost_by_period_usd=[], validation=None, strict=strict, battery_mode=battery_mode
+        cost_by_period_usd=[], validation=None, strict=strict, battery_mode=battery_mode,
+        metadata=meta
     )
 
     # Average incremental costs across contingencies
@@ -749,7 +756,8 @@ def solve_security_constrained(
         contingency_cost_usd=_clean(avg_incr_total),
         preventive_result=prev_res,
         contingencies=c_schedules,
-        validation=None
+        validation=None,
+        metadata=meta
     )
 
     val_report = verify_scps_result(scps_problem, raw_result, tol=1e-5, battery_mode=battery_mode)

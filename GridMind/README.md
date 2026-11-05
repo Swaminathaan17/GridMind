@@ -8,11 +8,11 @@ GridMind is a **backend-only** linear-programming engine (Python 3.11, Pyomo, an
 > network. It does not predict, forecast or control any real electricity grid, and its numbers must
 > not be used for real operational, market or safety decisions.
 
-**Stage status:** Stage 5D is the last officially accepted stage. Stage 5E is **not accepted**;
-E1-E9 have local evidence, including verified GLPK/CBC/HiGHS LP and MIP parity, and the pushed
-`6ce5ee6` CI run passed Windows and Ubuntu. Acceptance still requires clean-provenance E9 evidence
-and a final review. Current evidence and limitations are recorded in `STAGE5E_QUALIFICATION.md`,
-`STAGE5E_AUDIT.md` and `STAGE5E_ACCEPTANCE_REPORT.md`.
+**Stage status:** **GridMind 1.0 Production Release**.
+Stages 5A through 5F are fully qualified and accepted. Production readiness program P0 through P6
+completed with unified solver resilience, execution provenance, SCPS N-1 security co-optimization,
+and independent solution verification. Evidence recorded in P1 through P6 acceptance reports and
+`GRIDMIND_1.0_FINAL_QUALIFICATION_REPORT.md`.
 
 ## Mathematical formulation
 
@@ -571,6 +571,29 @@ network** (they are references, not deployable schedules):
   problem/config provenance, selected LP/MIP battery-mode propagation, and the causal stochastic hybrid:
   changing only future realized conditions leaves its current-period executed actions unchanged, and
   executed battery actions never exceed the committed first-stage actions.
+
+
+
+## Stage 5F & GridMind 1.0 Capabilities
+
+### Security-Constrained Preventive Scheduling (SCPS)
+GridMind 1.0 provides Security-Constrained Preventive Scheduling (`gridmind/security.py`) over multi-period intertemporal networks subject to N-1 contingency sets:
+- **Preventive + Corrective Co-Optimization**: Solves a monolithic mathematical program coupling preventive dispatch trajectories across periods with post-contingency recourse corrective trajectories for generator and transmission line outages.
+- **Ramping Limits & Recourse**: Surviving generators respect downward and upward corrective ramp limits relative to preventive dispatch. Failed components are forced to zero output/flow.
+- **Independent Verification Engine**: Results are strictly evaluated by `gridmind/security_validation.py` (`verify_scps_result`), recomputing feasibility across all contingency trajectories independently from the solver.
+
+### Unified Solver Resilience & Options (`gridmind/solver.py`)
+GridMind provides structured solver management via `SolverOptions`:
+- Explicit parameterization of `time_limit_seconds`, `mip_gap`, and `threads`.
+- Safe translation to Pyomo solver options and direct backend bindings (`highs_options` for `appsi_highs`).
+- HiGHS global thread scheduler isolation and safe multi-instance reset.
+- Normalized termination status mapping across solvers: `optimal`, `infeasible`, `unbounded`, `time_limit`, `interrupted`, and `solver_error`.
+
+### Execution Provenance & Safe Serialization (`gridmind/provenance.py`)
+- Automatic generation of `ExecutionMetadata` on every solve (`SolveResult`, `ScheduleResult`, `SCPSResult`).
+- Deterministic SHA-256 fingerprinting of input network/horizon problems.
+- Full tracking of UTC execution timestamp, GridMind release version, solver backend version, and applied options.
+- Hardened `to_dict()` and `json.dumps()` serialization: non-finite floats (`NaN`, `+Inf`, `-Inf`) serialize safely to explicit standard strings without runtime errors or silent corruption.
 
 ## Assumptions and limitations
 

@@ -17,8 +17,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from gridmind.network import Network
-from gridmind.solver import (ENV_SOLVER, ENV_SOLVER_PATH, SolverUnavailableError, make_solver,
-                             resolve_solver, solver_available, solver_name)
+from gridmind.provenance import ExecutionMetadata, capture_execution_metadata, sanitize_for_serialization
+from gridmind.solver import (ENV_SOLVER, ENV_SOLVER_PATH, SolverOptions, SolverUnavailableError,
+                             make_solver, map_termination_status, resolve_solver, solver_available,
+                             solver_name)
 from gridmind.validation import ValidationReport, recompute_objective, validate_solution
 
 CLEAN_EPS = 1e-9
@@ -44,16 +46,18 @@ class SolveResult:
     duals: dict[str, float] = field(default_factory=dict)      # raw solver duals, if provided
     validation: ValidationReport | None = None
     strict: bool = False         # True: unmet demand was forbidden
+    metadata: ExecutionMetadata | None = None
 
     @property
     def ok(self) -> bool:
         return self.status == "optimal" and (self.validation is None or self.validation.passed)
 
     def to_dict(self) -> dict[str, Any]:
-        d = {k: v for k, v in vars(self).items() if k != "validation"}
+        d = {k: v for k, v in vars(self).items() if k not in ("validation", "metadata")}
         d["validation"] = self.validation.to_dict() if self.validation else None
+        d["metadata"] = self.metadata.to_dict() if self.metadata else None
         d["ok"] = self.ok
-        return d
+        return sanitize_for_serialization(d)
 
 
 # ---------------------------------------------------------------- solver ----
@@ -119,23 +123,28 @@ def build_model(network: Network, allow_unmet: bool = True) -> Any:
 
 
 # ----------------------------------------------------------------- solve ----
-def _failure(status: str, solver: str, term: str, msg: str, runtime: float, network: Network, strict: bool) -> SolveResult:
+def _failure(status: str, solver: str, term: str, msg: str, runtime: float, network: Network, strict: bool,
+             metadata: ExecutionMetadata | None = None) -> SolveResult:
     return SolveResult(status=status, solver=solver, termination_condition=term, message=msg,
-                       runtime_seconds=runtime, total_demand_mw=network.total_demand_mw, strict=strict)
+                       runtime_seconds=runtime, total_demand_mw=network.total_demand_mw, strict=strict,
+                       metadata=metadata)
 
 
 def _clean(x: float) -> float:
     return 0.0 if abs(x) < CLEAN_EPS else float(x)
 
 
-def solve_dispatch(network: Network, *, allow_unmet: bool = True, validate: bool = True) -> SolveResult:
+def solve_dispatch(network: Network, *, allow_unmet: bool = True, validate: bool = True,
+                   options: SolverOptions | None = None) -> SolveResult:
     """Build, solve and validate. Never fabricates values: on any non-optimal
     outcome the result has status != 'optimal', objective None and empty dicts."""
     strict = not allow_unmet
     try:
-        name, solver = resolve_solver()
+        name, solver = resolve_solver(options=options) if options is not None else resolve_solver()
     except SolverUnavailableError as exc:
         return _failure("solver_unavailable", solver_name(), "not_run", str(exc), 0.0, network, strict)
+
+    meta = capture_execution_metadata(solver, name, network, options=options)
 
     import pyomo.environ as pyo
     from pyomo.opt import SolverStatus, TerminationCondition
@@ -143,26 +152,27 @@ def solve_dispatch(network: Network, *, allow_unmet: bool = True, validate: bool
     try:
         model = build_model(network, allow_unmet=allow_unmet)
     except ValueError as exc:
-        return _failure("error", name, "model_build_failed", f"invalid network: {exc}", 0.0, network, strict)
+        return _failure("error", name, "model_build_failed", f"invalid network: {exc}", 0.0, network, strict, metadata=meta)
 
     t0 = time.perf_counter()
     try:
         results = solver.solve(model, load_solutions=False, tee=False)
     except Exception as exc:  # solver crash, bad executable, parse failure ...
         return _failure("error", name, "solver_exception", f"{type(exc).__name__}: {exc}",
-                        time.perf_counter() - t0, network, strict)
+                        time.perf_counter() - t0, network, strict, metadata=meta)
     runtime = time.perf_counter() - t0
 
     term = results.solver.termination_condition
     term_s = str(term)
     if term != TerminationCondition.optimal or results.solver.status not in (SolverStatus.ok, SolverStatus.warning):
-        status = {TerminationCondition.infeasible: "infeasible",
-                  TerminationCondition.unbounded: "unbounded",
-                  TerminationCondition.infeasibleOrUnbounded: "infeasible_or_unbounded"}.get(term, "error")
+        status = map_termination_status(term, default="error")
         msg = {"infeasible": "model is infeasible: no schedule satisfies all constraints",
-               "unbounded": "model is unbounded (check data)"}.get(status, f"solver did not reach optimality (status={results.solver.status}, termination={term_s})")
-        return _failure(status, name, term_s, msg, runtime, network, strict)
-
+               "unbounded": "model is unbounded (check data)",
+               "time_limit": f"solver reached time limit (termination={term_s})",
+               "interrupted": f"solver execution interrupted (termination={term_s})",
+               "solver_error": f"solver error encountered (termination={term_s})"}.get(
+            status, f"solver did not reach optimality (status={results.solver.status}, termination={term_s})")
+        return _failure(status, name, term_s, msg, runtime, network, strict, metadata=meta)
     try:
         model.solutions.load_from(results)
         dispatch = {g: pyo.value(model.p[g], exception=False) for g in model.G}
@@ -172,7 +182,7 @@ def solve_dispatch(network: Network, *, allow_unmet: bool = True, validate: bool
         if reported is None or any(v is None for d in (dispatch, flows, unmet) for v in d.values()):
             raise ValueError("solver reported optimal but returned no values")
     except Exception as exc:
-        return _failure("error", name, term_s, f"could not read solution: {exc}", runtime, network, strict)
+        return _failure("error", name, term_s, f"could not read solution: {exc}", runtime, network, strict, metadata=meta)
 
     dispatch = {k: _clean(v) for k, v in dispatch.items()}
     flows = {k: _clean(v) for k, v in flows.items()}
@@ -198,4 +208,4 @@ def solve_dispatch(network: Network, *, allow_unmet: bool = True, validate: bool
         served_demand_mw=network.total_demand_mw - total_unmet,
         dispatch=dispatch, flows=flows, unmet=unmet,
         served={n.id: n.demand_mw - unmet[n.id] for n in network.nodes},
-        duals=duals, validation=report, strict=strict)
+        duals=duals, validation=report, strict=strict, metadata=meta)
