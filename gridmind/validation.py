@@ -6,6 +6,8 @@ termination cannot silently pass.
 """
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Mapping, Sequence
 
@@ -206,6 +208,34 @@ def validate_schedule(problem: "ScheduleProblem", dispatch, flows, unmet, charge
     checks.append(Check("horizon_length", not bad_len, float(len(bad_len)),
                         f"wrong number of periods for: {bad_len}" if bad_len else ""))
     if bad_len:
+        return _report(checks, evaluate_exclusivity=False)
+
+    non_finite: list[str] = []
+    trajectories = {
+        "dispatch": dispatch, "flows": flows, "unmet": unmet,
+        "charge": charge, "discharge": discharge, "soc": soc,
+    }
+    for name, values in trajectories.items():
+        for element_id, series in values.items():
+            for t, value in enumerate(series):
+                try:
+                    finite = math.isfinite(float(value))
+                except (TypeError, ValueError, OverflowError):
+                    finite = False
+                if not finite:
+                    non_finite.append(f"{name}[{element_id}][{t}]={value!r}")
+    if reported_objective is not None:
+        try:
+            objective_finite = math.isfinite(float(reported_objective))
+        except (TypeError, ValueError, OverflowError):
+            objective_finite = False
+        if not objective_finite:
+            non_finite.append(f"reported_objective={reported_objective!r}")
+    checks.append(Check(
+        "finite_values", not non_finite, float(len(non_finite)),
+        "non-finite numerical values: " + ", ".join(non_finite) if non_finite else "",
+    ))
+    if non_finite:
         return _report(checks, evaluate_exclusivity=False)
 
     add("generator_limits",
