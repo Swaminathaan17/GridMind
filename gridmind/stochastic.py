@@ -556,47 +556,101 @@ def _extract_first_stage(model: Any, risk: RiskConfig, T: list[int], pyo: Any) -
 def _validate_scenario(problem: ScheduleProblem, scenario_problem: ScheduleProblem,
                        dispatch: Any, flows: Any, unmet: Any, charge: Any, discharge: Any, soc: Any,
                        reported: float, allow_unmet: bool, battery_mode: str) -> Any:
-    """Validate one scenario's trajectories in a Riemann sum (no Pyomo)."""
+    """Independently validate one scenario against the complete schedule physics."""
     import math
+
     dt = problem.step_hours
     net, hor = scenario_problem.network, scenario_problem.horizon
-    T = list(range(problem.periods))
+    periods = range(problem.periods)
+    tol = 1e-5
+    arrays = {
+        "dispatch": (dispatch, {g.id for g in net.generators}),
+        "flows": (flows, {line.id for line in net.lines}),
+        "unmet": (unmet, {n.id for n in net.nodes}),
+        "charge": (charge, {b.id for b in problem.batteries}),
+        "discharge": (discharge, {b.id for b in problem.batteries}),
+        "soc": (soc, {b.id for b in problem.batteries}),
+    }
+    for values, ids in arrays.values():
+        if set(values) != ids or any(len(row) != problem.periods for row in values.values()):
+            return _SimpleReport(False)
+        for row in values.values():
+            for value in row:
+                try:
+                    if not math.isfinite(float(value)):
+                        return _SimpleReport(False)
+                except (TypeError, ValueError, OverflowError):
+                    return _SimpleReport(False)
+    try:
+        if not math.isfinite(float(reported)):
+            return _SimpleReport(False)
+    except (TypeError, ValueError, OverflowError):
+        return _SimpleReport(False)
+
     ok = True
-    # generator limits
     for g in net.generators:
-        for t in T:
-            limit = hor.generation_limit(g, t)
-            if dispatch[g.id][t] < -1e-5 or dispatch[g.id][t] > limit + 1e-5:
+        previous = problem.initial_dispatch_mw.get(g.id)
+        for t in periods:
+            value = dispatch[g.id][t]
+            if value < -tol or value > hor.generation_limit(g, t) + tol:
                 ok = False
-    # power balance
-    for n in net.nodes:
-        for t in T:
-            gen = sum(dispatch[g.id][t] for g in net.generators if g.node == n.id)
-            inflow = sum(flows[l.id][t] for l in net.lines if l.to_node == n.id)
-            outflow = sum(flows[l.id][t] for l in net.lines if l.from_node == n.id)
-            dis = sum(discharge[b.id][t] for b in problem.batteries if b.node == n.id)
-            ch = sum(charge[b.id][t] for b in problem.batteries if b.node == n.id)
-            if abs(gen + inflow - outflow + dis - ch + unmet[n.id][t] - hor.demand(n.id, t)) > 1e-4:
+            if previous is not None:
+                if g.ramp_up_mw is not None and value - previous > g.ramp_up_mw + tol:
+                    ok = False
+                if g.ramp_down_mw is not None and previous - value > g.ramp_down_mw + tol:
+                    ok = False
+            previous = value
+
+    for line in net.lines:
+        for t in periods:
+            value = flows[line.id][t]
+            if abs(value) > hor.line_limit(line, t) + tol:
                 ok = False
-    # battery dynamics + exclusivity
-    for b in problem.batteries:
-        prev = b.initial_soc_mwh
-        for t in T:
-            expected = prev + b.eta_charge * charge[b.id][t] * dt - discharge[b.id][t] * dt / b.eta_discharge
-            if abs(soc[b.id][t] - expected) > 1e-4:
+            if not hor.line_in_service[t][line.id] and abs(value) > tol:
                 ok = False
-            if battery_mode == "exclusive" and min(charge[b.id][t], discharge[b.id][t]) > 1e-5:
+
+    for node in net.nodes:
+        for t in periods:
+            value = unmet[node.id][t]
+            demand = hor.demand(node.id, t)
+            if value < -tol or value > demand + tol or (not allow_unmet and abs(value) > tol):
                 ok = False
-            prev = soc[b.id][t]
-    # objective consistency (operating + tiebreak)
+            gen = sum(dispatch[g.id][t] for g in net.generators if g.node == node.id)
+            inflow = sum(flows[l.id][t] for l in net.lines if l.to_node == node.id)
+            outflow = sum(flows[l.id][t] for l in net.lines if l.from_node == node.id)
+            dis = sum(discharge[b.id][t] for b in problem.batteries if b.node == node.id)
+            ch = sum(charge[b.id][t] for b in problem.batteries if b.node == node.id)
+            if abs(gen + inflow - outflow + dis - ch + value - demand) > tol:
+                ok = False
+
+    for battery in problem.batteries:
+        previous = battery.initial_soc_mwh
+        for t in periods:
+            ch, dis, current = charge[battery.id][t], discharge[battery.id][t], soc[battery.id][t]
+            if ch < -tol or ch > battery.max_charge_mw + tol:
+                ok = False
+            if dis < -tol or dis > battery.max_discharge_mw + tol:
+                ok = False
+            expected = previous + battery.eta_charge * ch * dt - dis * dt / battery.eta_discharge
+            if abs(current - expected) > tol:
+                ok = False
+            if current < battery.min_soc_mwh - tol or current > battery.capacity_mwh + tol:
+                ok = False
+            if battery_mode == "exclusive" and min(ch, dis) > tol:
+                ok = False
+            previous = current
+        if battery.final_soc_mwh is not None and abs(soc[battery.id][-1] - battery.final_soc_mwh) > tol:
+            ok = False
+
     penalty = net.unmet_penalty_per_mwh
-    gen_cost = dt * sum(net.generator(g).cost_per_mwh * v for g, series in dispatch.items() for v in series)
-    pen = dt * penalty * sum(v for series in unmet.values() for v in series)
-    thr = dt * sum(problem.battery(b).throughput_cost_per_mwh * v
-                   for b, series in discharge.items() for v in series)
-    tie = dt * problem.tiebreak_epsilon * (sum(v for series in charge.values() for v in series)
-                                           + sum(v for series in discharge.values() for v in series))
-    recomputed = gen_cost + pen + thr + tie
+    gen_cost = dt * sum(net.generator(g).cost_per_mwh * v for g, row in dispatch.items() for v in row)
+    pen = dt * penalty * sum(v for row in unmet.values() for v in row)
+    throughput = dt * sum(problem.battery(b).throughput_cost_per_mwh * v
+                           for b, row in discharge.items() for v in row)
+    tie = dt * problem.tiebreak_epsilon * (
+        sum(v for row in charge.values() for v in row)
+        + sum(v for row in discharge.values() for v in row))
+    recomputed = gen_cost + pen + throughput + tie
     if abs(recomputed - reported) / max(1.0, abs(reported)) > 1e-6:
         ok = False
     return _SimpleReport(ok)
