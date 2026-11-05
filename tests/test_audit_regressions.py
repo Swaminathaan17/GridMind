@@ -61,16 +61,13 @@ def test_scenario_set_rejects_duplicate_ids():
     problem = _problem()
     generated = generate_scenarios(problem, UncertaintyConfig(n_scenarios=2, seed=71))
     first, second = generated.scenarios
-    duplicate = ScenarioSet(
-        scenarios=(replace(first, id="duplicate", probability=0.5),
-                   replace(second, id="duplicate", probability=0.5)),
-        demand_nodes=generated.demand_nodes,
-        availability_generators=generated.availability_generators,
-    )
     with pytest.raises(ValueError, match="scenario IDs must be unique.*duplicate"):
-        duplicate
-
-
+        ScenarioSet(
+            scenarios=(replace(first, id="duplicate", probability=0.5),
+                       replace(second, id="duplicate", probability=0.5)),
+            demand_nodes=generated.demand_nodes,
+            availability_generators=generated.availability_generators,
+        )
 def test_scenario_set_accepts_unique_ids():
     problem = _problem()
     generated = generate_scenarios(problem, UncertaintyConfig(n_scenarios=2, seed=72))
