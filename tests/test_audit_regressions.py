@@ -52,6 +52,11 @@ def _stochastic_report(problem, trajectories):
     )
 
 
+def test_stochastic_scenario_validator_accepts_feasible_trajectory():
+    problem = _problem()
+    assert _stochastic_report(problem, _trajectories()).passed
+
+
 def test_scenario_set_rejects_duplicate_ids():
     problem = _problem()
     generated = generate_scenarios(problem, UncertaintyConfig(n_scenarios=2, seed=71))
