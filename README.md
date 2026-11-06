@@ -8,11 +8,11 @@ GridMind is a **backend-only** linear-programming engine (Python 3.11, Pyomo, an
 > network. It does not predict, forecast or control any real electricity grid, and its numbers must
 > not be used for real operational, market or safety decisions.
 
-**Stage status:** **GridMind 1.0 Production Release**.
-Stages 5A through 5F are fully qualified and accepted. Production readiness program P0 through P6
-completed with unified solver resilience, execution provenance, SCPS N-1 security co-optimization,
-and independent solution verification. Evidence recorded in P1 through P6 acceptance reports and
-`GRIDMIND_1.0_FINAL_QUALIFICATION_REPORT.md`.
+**Stage status:** **GridMind 1.0 qualification-stage engineering release (research prototype)**.
+Stages 5A through 5F and the P0–P6 engineering qualification work are documented as completed.
+This is not a production deployment certification: GridMind is designed for synthetic-network
+research and decision support only. Consolidated phase evidence is recorded in
+`docs/qualification/GRIDMIND_P0-P6_ACCEPTANCE_REPORT.md` and the final qualification report.
 
 ## Mathematical formulation
 
