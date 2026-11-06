@@ -1,5 +1,8 @@
 # GridMind 1.0 — Production Implementation Plan (P1–P6)
 
+> **Historical planning document:** This file records the original P1–P6 programme objectives and uses the programme's original production-readiness terminology. Completion of the documented engineering phases is not a production deployment certification; GridMind remains a research / decision-support prototype for synthetic networks.
+
+
 **Milestone:** Production Readiness & 1.0 Delivery
 **Repository:** `Swaminathaan17/GridMind` (`C:\Users\DELL\Downloads\GridMind-Stage5E-clean\GridMind`)
 **Base Commit:** `0e2ca9306455c2780e1f6b480a04e0bbc8319f09` (`stage-5f-accepted`)
