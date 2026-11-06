@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-GridMind 1.0 marks the formal production-ready milestone of the GridMind backend energy-grid optimization engine. Built with Python 3.11, Pyomo, and HiGHS, GridMind delivers rigorous, mathematically sound, and independently validated solutions for single-period economic dispatch, multi-period intertemporal scheduling with battery storage, two-stage stochastic planning, and Security-Constrained Preventive Scheduling (SCPS).
+GridMind 1.0 marks a qualification-stage engineering milestone for the GridMind backend energy-grid optimization engine. The qualification evidence does not certify production deployment or real-grid operational use. Built with Python 3.11, Pyomo, and HiGHS, GridMind delivers rigorous, mathematically sound, and independently validated solutions for single-period economic dispatch, multi-period intertemporal scheduling with battery storage, two-stage stochastic planning, and Security-Constrained Preventive Scheduling (SCPS).
 
 GridMind is strictly backend-only and models lossless capacity-constrained transportation network flow.
 
